@@ -1,374 +1,744 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ko">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>amure-db</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.4/cytoscape.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d1117;color:#c9d1d9;overflow:hidden;height:100vh}
-.top{background:#161b22;padding:10px 20px;border-bottom:1px solid #30363d;display:flex;align-items:center;gap:12px;height:50px}
-.top h1{font-size:18px;color:#58a6ff}
-.top input{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:6px 12px;border-radius:6px;font-size:14px;width:300px}
-.top select{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:6px 10px;border-radius:6px;font-size:13px;cursor:pointer}
-.top .st{font-size:13px;color:#8b949e;margin-left:auto;display:flex;gap:14px}
-.top .st span{color:#58a6ff}
-.btn{padding:6px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500}
+html{scroll-behavior:smooth}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',sans-serif;background:#0d1117;color:#c9d1d9;height:100vh;overflow:hidden}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:#0d1117}
+::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:#484f58}
+
+/* Header */
+.header{background:#161b22;padding:0 20px;border-bottom:1px solid #30363d;display:flex;align-items:center;gap:12px;height:48px;flex-shrink:0}
+.header h1{font-size:17px;color:#58a6ff;cursor:pointer;white-space:nowrap;user-select:none}
+.header h1:hover{color:#79c0ff}
+.search-box{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:6px 12px;border-radius:6px;font-size:14px;width:320px;transition:border-color .2s}
+.search-box:focus{outline:none;border-color:#58a6ff}
+.hdr-stats{font-size:13px;color:#8b949e;margin-left:auto;display:flex;gap:14px;white-space:nowrap}
+.hdr-stats span{color:#58a6ff}
+.btn{padding:6px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;transition:opacity .15s}
 .btn:hover{opacity:0.85}
 .b-blue{background:#1f6feb;color:#fff}
 .b-green{background:#238636;color:#fff}
 .b-orange{background:#9e6a03;color:#fff}
 .b-red{background:#da3633;color:#fff}
-.main{display:flex;height:calc(100vh - 50px)}
-.side{width:340px;background:#161b22;border-right:1px solid #30363d;overflow-y:auto;flex-shrink:0;padding:12px}
-.side h3{font-size:12px;color:#8b949e;margin:12px 0 6px;text-transform:uppercase;letter-spacing:0.5px}
-.ni{padding:6px 8px;margin:2px 0;border-radius:4px;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:6px}
-.ni:hover{background:#1f6feb22}
-.ni.sel{background:#1f6feb33;border:1px solid #1f6feb}
-.dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-.ni .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.badge{font-size:10px;padding:1px 6px;border-radius:8px;background:#30363d}
-.canvas{flex:1;position:relative}
-#cy{width:100%;height:100%}
-.panel{position:absolute;top:10px;right:10px;width:320px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;font-size:13px;display:none;max-height:80vh;overflow-y:auto;z-index:10}
-.panel h3{color:#58a6ff;font-size:15px;margin-bottom:8px}
-.panel .kw{display:flex;flex-wrap:wrap;gap:3px;margin:6px 0}
-.panel .kw span{background:#30363d;padding:2px 6px;border-radius:3px;font-size:11px}
-.ei{padding:4px 6px;margin:2px 0;border-radius:3px;background:#0d1117;font-size:12px;cursor:pointer}
-.ei:hover{background:#1f6feb22}
-.legend{display:flex;gap:8px;flex-wrap:wrap;font-size:11px;margin-bottom:8px}
-.legend .i{display:flex;align-items:center;gap:3px}
-.legend .c{width:10px;height:10px;border-radius:50%}
+.b-ghost{background:transparent;color:#8b949e;border:1px solid #30363d}
+.b-ghost:hover{color:#c9d1d9;border-color:#484f58}
+
+/* Layout */
+.layout{display:flex;height:calc(100vh - 48px);overflow:hidden}
+
+/* Sidebar */
+.sidebar{width:260px;background:#161b22;border-right:1px solid #30363d;overflow-y:auto;flex-shrink:0;padding:12px;display:flex;flex-direction:column;gap:4px}
+.sidebar-section-title{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;padding:10px 0 4px;font-weight:600}
+.toc-item{padding:6px 10px;border-radius:5px;cursor:pointer;font-size:13px;color:#c9d1d9;text-decoration:none;display:flex;align-items:center;gap:6px;transition:background .15s}
+.toc-item:hover{background:#1f6feb22}
+.toc-item .toc-count{margin-left:auto;font-size:11px;color:#8b949e;background:#21262d;padding:1px 6px;border-radius:8px}
+.toc-item .toc-dot{width:4px;height:16px;border-radius:2px;flex-shrink:0}
+.recent-item{padding:5px 10px;border-radius:5px;cursor:pointer;font-size:12px;color:#8b949e;display:flex;align-items:center;gap:6px;transition:background .15s;overflow:hidden}
+.recent-item:hover{background:#1f6feb22;color:#c9d1d9}
+.recent-item .ri-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.recent-item .ri-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sidebar-kind-stat{padding:6px 10px;font-size:13px;display:flex;align-items:center;gap:8px}
+.sidebar-kind-stat .sk-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.sidebar-kind-stat .sk-count{margin-left:auto;color:#8b949e;font-size:12px}
+
+/* Main content */
+.main-content{flex:1;overflow-y:auto;padding:0}
+.content-inner{max-width:900px;margin:0 auto;padding:24px 32px 60px}
+
+/* Breadcrumb */
+.breadcrumb{display:flex;align-items:center;gap:4px;font-size:12px;color:#8b949e;margin-bottom:16px;flex-wrap:wrap}
+.breadcrumb a{color:#58a6ff;cursor:pointer;text-decoration:none}
+.breadcrumb a:hover{text-decoration:underline}
+.breadcrumb .bc-sep{color:#484f58}
+
+/* Nav buttons */
+.nav-bar{display:flex;align-items:center;gap:6px;margin-bottom:12px}
+.nav-btn{background:#21262d;border:1px solid #30363d;color:#8b949e;padding:4px 10px;border-radius:5px;cursor:pointer;font-size:12px;transition:all .15s}
+.nav-btn:hover{color:#c9d1d9;border-color:#484f58}
+.nav-btn:disabled{opacity:.3;cursor:default}
+
+/* Home view */
+.home-search{text-align:center;padding:60px 0 40px}
+.home-search h2{font-size:24px;color:#c9d1d9;margin-bottom:16px;font-weight:400}
+.home-search-input{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:12px 20px;border-radius:8px;font-size:16px;width:100%;max-width:560px;transition:border-color .2s}
+.home-search-input:focus{outline:none;border-color:#58a6ff}
+
+/* Kind group */
+.kind-group{margin-bottom:20px}
+.kind-group-header{display:flex;align-items:center;gap:8px;padding:10px 0;cursor:pointer;user-select:none;border-bottom:1px solid #21262d}
+.kind-group-header:hover{border-bottom-color:#30363d}
+.kind-group-header .kg-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.kind-group-header h3{font-size:15px;font-weight:600;color:#c9d1d9}
+.kind-group-header .kg-count{font-size:13px;color:#8b949e}
+.kind-group-header .kg-toggle{margin-left:auto;color:#484f58;font-size:12px;transition:transform .2s}
+.kind-group-header.collapsed .kg-toggle{transform:rotate(-90deg)}
+.kind-group-list{padding:4px 0}
+.kind-group-header.collapsed+.kind-group-list{display:none}
+
+/* Node card (list item) */
+.node-card{display:flex;align-items:center;gap:10px;padding:10px 12px;margin:2px 0;border-radius:6px;cursor:pointer;border:1px solid transparent;transition:all .15s}
+.node-card:hover{background:#161b22;border-color:#30363d}
+.node-card .nc-kind{font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;white-space:nowrap;flex-shrink:0}
+.node-card .nc-statement{flex:1;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node-card .nc-status{font-size:10px;padding:2px 8px;border-radius:10px;white-space:nowrap;flex-shrink:0}
+.node-card .nc-keywords{display:flex;gap:3px;flex-shrink:0}
+.node-card .nc-keywords span{font-size:10px;background:#21262d;color:#8b949e;padding:1px 5px;border-radius:3px}
+.node-card.failed{opacity:.55}
+.node-card.failed .nc-statement{text-decoration:line-through}
+
+/* Search result card */
+.search-result-card{display:flex;align-items:center;gap:10px;padding:10px 12px;margin:2px 0;border-radius:6px;cursor:pointer;border:1px solid transparent;transition:all .15s}
+.search-result-card:hover{background:#161b22;border-color:#30363d}
+.search-result-card .src-score{font-size:11px;background:#1f6feb33;color:#58a6ff;padding:2px 8px;border-radius:10px;flex-shrink:0}
+
+/* Wiki page */
+.wiki-header{margin-bottom:24px}
+.wiki-badges{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.wiki-kind-badge{font-size:13px;font-weight:700;padding:4px 12px;border-radius:5px}
+.wiki-status-badge{font-size:12px;padding:3px 10px;border-radius:12px;font-weight:500}
+.wiki-title{font-size:22px;font-weight:600;line-height:1.4;margin:12px 0 8px;color:#e6edf3}
+.wiki-meta{font-size:12px;color:#8b949e;display:flex;flex-direction:column;gap:4px;margin-top:8px}
+.wiki-meta-row{display:flex;gap:16px;flex-wrap:wrap}
+.wiki-keywords{display:flex;flex-wrap:wrap;gap:4px;margin-top:10px}
+.wiki-keyword{font-size:12px;background:#21262d;color:#58a6ff;padding:3px 10px;border-radius:4px;cursor:pointer;border:1px solid #30363d;transition:all .15s}
+.wiki-keyword:hover{background:#1f6feb22;border-color:#58a6ff}
+.wiki-metadata{margin-top:12px;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;font-size:13px}
+.wiki-metadata table{width:100%;border-collapse:collapse}
+.wiki-metadata td{padding:4px 8px;vertical-align:top}
+.wiki-metadata td:first-child{color:#8b949e;white-space:nowrap;width:1%}
+.wiki-metadata td:last-child{color:#c9d1d9;word-break:break-all}
+
+.wiki-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.status-select{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:4px 8px;border-radius:5px;font-size:12px;cursor:pointer}
+.status-select:focus{outline:none;border-color:#58a6ff}
+
+/* Wiki section */
+.wiki-section{margin-top:28px}
+.wiki-section-heading{font-size:16px;font-weight:600;color:#e6edf3;padding:8px 0;border-left:3px solid #30363d;padding-left:12px;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.wiki-section-heading .ws-count{font-size:12px;color:#8b949e;font-weight:400}
+.wiki-section-heading[data-color]{border-left-color:var(--section-color)}
+
+/* Connected node item */
+.conn-item{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;margin:4px 0;border-radius:6px;cursor:pointer;background:#161b22;border:1px solid #21262d;transition:all .15s}
+.conn-item:hover{border-color:#30363d;background:#1c2128}
+.conn-item .ci-arrow{color:#484f58;font-size:14px;flex-shrink:0;margin-top:2px}
+.conn-item .ci-kind{font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;flex-shrink:0;margin-top:1px}
+.conn-item .ci-body{flex:1;min-width:0}
+.conn-item .ci-statement{font-size:14px;color:#c9d1d9;line-height:1.4}
+.conn-item .ci-status{font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px}
+.conn-item .ci-note{font-size:12px;color:#484f58;margin-top:4px;font-style:italic}
+.conn-item.ci-failed{opacity:.55}
+.conn-item.ci-failed .ci-statement{text-decoration:line-through}
+
+/* Recommendation section */
+.rec-item{display:flex;align-items:center;gap:10px;padding:8px 14px;margin:4px 0;border-radius:6px;cursor:pointer;background:#161b22;border:1px solid #21262d;border-left:3px solid #484f58;transition:all .15s}
+.rec-item:hover{border-color:#30363d;background:#1c2128}
+
+/* Responsive */
+@media(max-width:768px){
+  .sidebar{display:none}
+  .content-inner{padding:16px}
+  .header{gap:8px;padding:0 12px}
+  .search-box{width:180px}
+  .wiki-title{font-size:18px}
+  .node-card .nc-keywords{display:none}
+}
+@media(max-width:480px){
+  .hdr-stats{display:none}
+  .search-box{width:140px}
+}
 </style>
 </head>
 <body>
-<div class="top">
-  <h1>amure-db</h1>
-  <input id="q" placeholder="Graph RAG search (동의어 자동 확장)..." onkeydown="if(event.key==='Enter')doSearch()">
-  <button class="btn b-blue" onclick="doSearch()">Search</button>
-  <select id="layout-select" onchange="changeLayout(this.value)">
-    <option value="dagre">Dagre (hierarchical)</option>
-    <option value="cose">Cose (force)</option>
-    <option value="breadthfirst">Breadthfirst</option>
-    <option value="circle">Circle</option>
-  </select>
-  <button class="btn b-green" onclick="batchYahoo()">Batch Yahoo</button>
-  <button class="btn b-orange" onclick="autoOrganize()">Auto Organize</button>
-  <div class="st">
-    <div>Nodes: <span id="sn">0</span></div>
-    <div>Edges: <span id="se">0</span></div>
+
+<div class="header">
+  <h1 onclick="goHome()">amure-db</h1>
+  <input class="search-box" id="q" placeholder="검색 (동의어 자동 확장)..." onkeydown="if(event.key==='Enter')doSearch()">
+  <button class="btn b-blue" onclick="doSearch()">검색</button>
+  <button class="btn b-green" onclick="batchYahoo()">Yahoo 배치</button>
+  <button class="btn b-orange" onclick="autoOrganize()">자동 정리</button>
+  <input id="ysym" placeholder="종목 추가..." style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:6px 10px;border-radius:6px;font-size:13px;width:120px" onkeydown="if(event.key==='Enter')addSymbol()">
+  <button class="btn b-green" onclick="addSymbol()" style="padding:6px 10px">+</button>
+  <div class="hdr-stats">
+    <div>노드 <span id="sn">0</span></div>
+    <div>엣지 <span id="se">0</span></div>
   </div>
 </div>
-<div class="main">
-  <div class="side">
-    <div class="legend">
-      <div class="i"><div class="c" style="background:#58a6ff"></div>Claim</div>
-      <div class="i"><div class="c" style="background:#d2a8ff"></div>Reason</div>
-      <div class="i"><div class="c" style="background:#8b949e"></div>Evidence</div>
-      <div class="i"><div class="c" style="background:#f0883e"></div>Experiment</div>
-      <div class="i"><div class="c" style="background:#3fb950"></div>Fact</div>
-    </div>
-    <div style="margin-bottom:8px">
-      <input id="ysym" placeholder="Symbol (AAPL, MSFT...)" style="width:60%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 8px;border-radius:4px;font-size:12px">
-      <button class="btn b-green" style="font-size:11px;padding:4px 8px" onclick="addOne()">+ Add</button>
-    </div>
-    <div id="sidebar-content"></div>
-    <div id="search-results" style="display:none"></div>
-  </div>
-  <div class="canvas">
-    <div id="cy"></div>
-    <div class="panel" id="panel"></div>
+
+<div class="layout">
+  <div class="sidebar" id="sidebar"></div>
+  <div class="main-content" id="main">
+    <div class="content-inner" id="content"></div>
   </div>
 </div>
+
 <script>
 const API='';
-async function api(p){return(await fetch(API+p)).json()}
-async function post(p,b){return(await fetch(API+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json()}
-
 const KC={Claim:'#58a6ff',Reason:'#d2a8ff',Evidence:'#8b949e',Experiment:'#f0883e',Fact:'#3fb950'};
-const EC={Support:'#3fb950',Rebut:'#f85149',DependsOn:'#484f58',Contradicts:'#f85149',Refines:'#58a6ff',DerivedFrom:'#f0883e'};
-const SHAPES={Claim:'round-rectangle',Reason:'ellipse',Evidence:'ellipse',Experiment:'diamond',Fact:'round-rectangle'};
-const EDGE_STYLE={Support:'solid',Rebut:'dashed',DependsOn:'solid',Contradicts:'dotted',Refines:'solid',DerivedFrom:'dashed'};
-const EDGE_ARROW={Support:'triangle',Rebut:'triangle',DependsOn:'triangle',Contradicts:'diamond',Refines:'triangle',DerivedFrom:'triangle'};
+const SC={Draft:'#8b949e',Active:'#58a6ff',Accepted:'#3fb950',Rejected:'#f85149',Weakened:'#d29922'};
+const EKC={Support:'#3fb950',Rebut:'#f85149',DependsOn:'#484f58',Contradicts:'#f85149',Refines:'#58a6ff',DerivedFrom:'#f0883e'};
+const KIND_LABELS={Claim:'Claim',Reason:'Reason',Evidence:'Evidence',Experiment:'Experiment',Fact:'Fact'};
+const EDGE_LABELS={Support:'지지',Rebut:'반론',DependsOn:'의존',Contradicts:'충돌',Refines:'구체화',DerivedFrom:'파생'};
 
-let nodes=[],edges=[],sel=null,cy=null,currentLayout='dagre';
+let allNodes=[], allEdges=[];
+let history=[], historyIdx=-1;
+let recentVisits=[];
+let currentView='home'; // 'home' | 'node' | 'search'
+let currentNodeId=null;
 
-// Initialize Cytoscape
-function initCy(){
-  cy=cytoscape({
-    container:document.getElementById('cy'),
-    style:[
-      {selector:'node',style:{
-        'label':'data(label)',
-        'text-valign':'bottom',
-        'text-halign':'center',
-        'font-size':'10px',
-        'color':'#8b949e',
-        'text-margin-y':6,
-        'text-max-width':'100px',
-        'text-wrap':'ellipsis',
-        'width':40,
-        'height':40,
-        'border-width':2,
-        'border-color':'data(color)',
-        'background-color':'data(color)',
-        'background-opacity':0.85
-      }},
-      {selector:'node[kind="Claim"]',style:{'shape':'round-rectangle','width':50,'height':36}},
-      {selector:'node[kind="Reason"]',style:{'shape':'ellipse','width':40,'height':40}},
-      {selector:'node[kind="Evidence"]',style:{'shape':'ellipse','width':36,'height':36}},
-      {selector:'node[kind="Experiment"]',style:{'shape':'diamond','width':44,'height':44}},
-      {selector:'node[kind="Fact"]',style:{'shape':'round-rectangle','width':46,'height':34}},
-      {selector:'node.failed',style:{'border-style':'dashed','opacity':0.5}},
-      {selector:'node:selected',style:{'border-color':'#ffffff','border-width':3}},
-      {selector:'node.highlighted',style:{'border-color':'#ffffff','border-width':3}},
-      {selector:'edge',style:{
-        'width':1.5,
-        'curve-style':'bezier',
-        'target-arrow-shape':'triangle',
-        'arrow-scale':0.8,
-        'opacity':0.7,
-        'label':'data(label)',
-        'font-size':'8px',
-        'text-rotation':'autorotate',
-        'text-margin-y':-8,
-        'text-background-color':'#0d1117',
-        'text-background-opacity':0.8,
-        'text-background-padding':'2px'
-      }},
-      {selector:'edge[kind="Support"]',style:{'line-color':'#3fb950','target-arrow-color':'#3fb950','color':'#3fb950','line-style':'solid','target-arrow-shape':'triangle'}},
-      {selector:'edge[kind="Rebut"]',style:{'line-color':'#f85149','target-arrow-color':'#f85149','color':'#f85149','line-style':'dashed','target-arrow-shape':'triangle'}},
-      {selector:'edge[kind="DependsOn"]',style:{'line-color':'#484f58','target-arrow-color':'#484f58','color':'#484f58','line-style':'solid','target-arrow-shape':'triangle'}},
-      {selector:'edge[kind="Contradicts"]',style:{'line-color':'#f85149','target-arrow-color':'#f85149','color':'#f85149','line-style':'dotted','target-arrow-shape':'diamond'}},
-      {selector:'edge[kind="Refines"]',style:{'line-color':'#58a6ff','target-arrow-color':'#58a6ff','color':'#58a6ff','line-style':'solid','target-arrow-shape':'triangle'}},
-      {selector:'edge[kind="DerivedFrom"]',style:{'line-color':'#f0883e','target-arrow-color':'#f0883e','color':'#f0883e','line-style':'dashed','target-arrow-shape':'triangle'}}
-    ],
-    layout:{name:'preset'},
-    wheelSensitivity:0.3,
-    minZoom:0.1,
-    maxZoom:5
-  });
+// --- API helpers ---
+async function api(p){const r=await fetch(API+p);return r.json()}
+async function post(p,b){return(await fetch(API+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json()}
+async function patch(p,b){return(await fetch(API+p,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json()}
+async function del(p){return fetch(API+p,{method:'DELETE'})}
 
-  cy.on('tap','node',function(evt){
-    pick(evt.target.id());
-  });
-
-  cy.on('tap',function(evt){
-    if(evt.target===cy){
-      sel=null;
-      document.getElementById('panel').style.display='none';
-      cy.nodes().removeClass('highlighted');
-      renderSide();
-    }
-  });
-}
-
-function buildElements(){
-  const elements=[];
-  nodes.forEach(function(n){
-    const isFailed=n.status==='Rejected'||n.status==='Weakened';
-    const lbl=n.statement.length>30?n.statement.substring(0,30)+'...':n.statement;
-    elements.push({
-      group:'nodes',
-      data:{
-        id:n.id,
-        label:lbl,
-        kind:n.kind,
-        status:n.status,
-        color:KC[n.kind]||'#8b949e',
-        statement:n.statement,
-        keywords:n.keywords,
-        metadata:n.metadata,
-        created_at:n.created_at,
-        updated_at:n.updated_at
-      },
-      classes:n.kind+(isFailed?' failed':'')
-    });
-  });
-  edges.forEach(function(e){
-    const srcExists=nodes.some(function(n){return n.id===e.source});
-    const tgtExists=nodes.some(function(n){return n.id===e.target});
-    if(srcExists&&tgtExists){
-      elements.push({
-        group:'edges',
-        data:{
-          id:e.id,
-          source:e.source,
-          target:e.target,
-          label:e.kind,
-          kind:e.kind,
-          weight:e.weight,
-          note:e.note,
-          created_at:e.created_at
-        },
-        classes:e.kind
-      });
-    }
-  });
-  return elements;
-}
-
-function getLayoutOptions(name){
-  switch(name){
-    case 'dagre':return{name:'dagre',rankDir:'TB',nodeSep:50,rankSep:80,animate:true,animationDuration:300};
-    case 'cose':return{name:'cose',animate:true,animationDuration:500,nodeRepulsion:function(){return 8000},idealEdgeLength:function(){return 80},edgeElasticity:function(){return 100},gravity:0.25};
-    case 'breadthfirst':return{name:'breadthfirst',directed:true,spacingFactor:1.2,animate:true,animationDuration:300};
-    case 'circle':return{name:'circle',animate:true,animationDuration:300};
-    default:return{name:'dagre',rankDir:'TB',nodeSep:50,rankSep:80,animate:true,animationDuration:300};
-  }
-}
-
-function runLayout(name){
-  if(!cy||cy.nodes().length===0)return;
-  currentLayout=name;
-  cy.layout(getLayoutOptions(name)).run();
-}
-
-function changeLayout(name){
-  currentLayout=name;
-  runLayout(name);
-}
-
-async function load(){
+// --- Data ---
+async function loadAll(){
   const d=await api('/api/graph/all');
-  nodes=d.nodes||[];edges=d.edges||[];
-  document.getElementById('sn').textContent=nodes.length;
-  document.getElementById('se').textContent=edges.length;
-  renderSide();
+  allNodes=d.nodes||[];
+  allEdges=d.edges||[];
+  document.getElementById('sn').textContent=allNodes.length;
+  document.getElementById('se').textContent=allEdges.length;
+}
 
-  if(!cy)initCy();
+function findNode(id){return allNodes.find(n=>n.id===id)}
+function getEdgesFor(id){return allEdges.filter(e=>e.source===id||e.target===id)}
 
-  cy.elements().remove();
-  const elements=buildElements();
-  if(elements.length>0){
-    cy.add(elements);
-    runLayout(currentLayout);
+// --- Navigation ---
+function navigate(nodeId, pushHistory){
+  if(pushHistory!==false){
+    if(historyIdx<history.length-1) history=history.slice(0,historyIdx+1);
+    history.push(nodeId);
+    historyIdx=history.length-1;
+  }
+  if(nodeId===null){
+    currentView='home';
+    currentNodeId=null;
+    window.location.hash='';
+    renderHome();
+    renderSidebar();
+  } else {
+    currentView='node';
+    currentNodeId=nodeId;
+    window.location.hash=nodeId;
+    addRecentVisit(nodeId);
+    renderNodePage(nodeId);
+    renderSidebar();
+  }
+  document.getElementById('main').scrollTop=0;
+}
+
+function goHome(){navigate(null,true)}
+
+function goBack(){
+  if(historyIdx>0){
+    historyIdx--;
+    const id=history[historyIdx];
+    navigate(id,false);
   }
 }
 
-function renderSide(){
+function goForward(){
+  if(historyIdx<history.length-1){
+    historyIdx++;
+    const id=history[historyIdx];
+    navigate(id,false);
+  }
+}
+
+function addRecentVisit(id){
+  recentVisits=recentVisits.filter(r=>r!==id);
+  recentVisits.unshift(id);
+  if(recentVisits.length>10) recentVisits=recentVisits.slice(0,10);
+}
+
+// --- Hash routing ---
+window.addEventListener('hashchange',function(){
+  const h=window.location.hash.slice(1);
+  if(h && h!==currentNodeId){
+    navigate(h,true);
+  } else if(!h && currentView!=='home' && currentView!=='search'){
+    navigate(null,true);
+  }
+});
+
+// --- Render: Sidebar ---
+function renderSidebar(){
+  const sb=document.getElementById('sidebar');
+  let h='';
+  if(currentView==='node' && currentNodeId){
+    h+=renderSidebarTOC(currentNodeId);
+  } else {
+    h+=renderSidebarKindStats();
+  }
+  h+=renderSidebarRecent();
+  sb.innerHTML=h;
+}
+
+function renderSidebarKindStats(){
+  const counts={};
+  allNodes.forEach(n=>{counts[n.kind]=(counts[n.kind]||0)+1});
+  let h='<div class="sidebar-section-title">노드 종류별 현황</div>';
+  for(const kind of ['Claim','Reason','Evidence','Experiment','Fact']){
+    const c=counts[kind]||0;
+    h+='<div class="sidebar-kind-stat"><div class="sk-dot" style="background:'+KC[kind]+'"></div>'+kind+'<span class="sk-count">'+c+'</span></div>';
+  }
+  return h;
+}
+
+function renderSidebarTOC(nodeId){
+  const node=findNode(nodeId);
+  if(!node) return '';
+  const edges=getEdgesFor(nodeId);
+  const sections=buildSections(nodeId,edges);
+  let h='<div class="sidebar-section-title">목차</div>';
+  h+='<a class="toc-item" href="#sec-info" onclick="scrollToSection(\'sec-info\');return false"><div class="toc-dot" style="background:#58a6ff"></div>기본 정보</a>';
+  for(const s of sections){
+    if(s.items.length===0) continue;
+    h+='<a class="toc-item" href="#sec-'+s.key+'" onclick="scrollToSection(\'sec-'+s.key+'\');return false">';
+    h+='<div class="toc-dot" style="background:'+s.color+'"></div>'+s.label;
+    h+='<span class="toc-count">'+s.items.length+'</span></a>';
+  }
+  h+='<a class="toc-item" href="#sec-rec" onclick="scrollToSection(\'sec-rec\');return false"><div class="toc-dot" style="background:#484f58"></div>관련 추천';
+  h+='<span class="toc-count" id="toc-rec-count">...</span></a>';
+  return h;
+}
+
+function renderSidebarRecent(){
+  if(recentVisits.length===0) return '';
+  let h='<div class="sidebar-section-title" style="margin-top:16px">최근 방문</div>';
+  for(const id of recentVisits){
+    const n=findNode(id);
+    if(!n) continue;
+    const c=KC[n.kind]||'#8b949e';
+    h+='<div class="recent-item" onclick="navigate(\''+n.id+'\',true)">';
+    h+='<div class="ri-dot" style="background:'+c+'"></div>';
+    h+='<div class="ri-text">'+esc(n.statement.substring(0,40))+(n.statement.length>40?'...':'')+'</div></div>';
+  }
+  return h;
+}
+
+function scrollToSection(id){
+  const el=document.getElementById(id);
+  if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+// --- Render: Home ---
+function renderHome(){
+  const c=document.getElementById('content');
+  let h='';
+  h+='<div class="home-search">';
+  h+='<h2>amure-db 지식 그래프</h2>';
+  h+='<input class="home-search-input" placeholder="검색어를 입력하세요..." onkeydown="if(event.key===\'Enter\'){document.getElementById(\'q\').value=this.value;doSearch()}">';
+  h+='</div>';
   const groups={};
-  nodes.forEach(function(n){var k=n.kind;if(!groups[k])groups[k]=[];groups[k].push(n)});
-  var h='';
-  var sortedKeys=Object.keys(groups).sort();
-  for(var i=0;i<sortedKeys.length;i++){
-    var kind=sortedKeys[i];
-    var list=groups[kind];
-    h+='<h3>'+kind+' ('+list.length+')</h3>';
-    var displayList=list.slice(0,30);
-    for(var j=0;j<displayList.length;j++){
-      var n=displayList[j];
-      var c=KC[n.kind]||'#8b949e';
-      var isFailed=n.status==='Rejected'||n.status==='Weakened';
-      h+='<div class="ni'+(n.id===sel?' sel':'')+'" onclick="pick(\''+n.id+'\')" style="'+(isFailed?'opacity:0.5':'')+'">';
-      h+='<div class="dot" style="background:'+c+'"></div>';
-      h+='<div class="t">'+n.statement.substring(0,35)+(n.statement.length>35?'...':'')+'</div>';
-      h+='<div class="badge">'+n.status+'</div></div>';
+  allNodes.forEach(n=>{if(!groups[n.kind])groups[n.kind]=[];groups[n.kind].push(n)});
+  for(const kind of ['Claim','Reason','Evidence','Experiment','Fact']){
+    const list=groups[kind]||[];
+    if(list.length===0) continue;
+    h+='<div class="kind-group">';
+    h+='<div class="kind-group-header" onclick="toggleKindGroup(this)">';
+    h+='<div class="kg-dot" style="background:'+KC[kind]+'"></div>';
+    h+='<h3>'+kind+'</h3><span class="kg-count">('+list.length+')</span>';
+    h+='<span class="kg-toggle">▼</span></div>';
+    h+='<div class="kind-group-list">';
+    const show=list.slice(0,50);
+    for(const n of show){
+      h+=renderNodeCard(n);
     }
-    if(list.length>30)h+='<div style="color:#8b949e;font-size:11px;padding:4px">+'+(list.length-30)+' more</div>';
+    if(list.length>50) h+='<div style="padding:8px 12px;color:#8b949e;font-size:13px">+ '+(list.length-50)+' 개 더...</div>';
+    h+='</div></div>';
   }
-  document.getElementById('sidebar-content').innerHTML=h;
+  c.innerHTML=h;
 }
 
-function pick(id){
-  sel=id;
-  renderSide();
+function toggleKindGroup(el){el.classList.toggle('collapsed')}
 
-  var n=nodes.find(function(x){return x.id===id});
-  if(!n)return;
-
-  // Highlight in cytoscape
-  cy.nodes().removeClass('highlighted');
-  var cyNode=cy.getElementById(id);
-  if(cyNode.length>0){
-    cyNode.addClass('highlighted');
-    cy.animate({center:{eles:cyNode},duration:300});
+function renderNodeCard(n){
+  const isFailed=n.status==='Rejected'||n.status==='Weakened';
+  const kc=KC[n.kind]||'#8b949e';
+  const sc=SC[n.status]||'#8b949e';
+  let h='<div class="node-card'+(isFailed?' failed':'')+'" onclick="navigate(\''+n.id+'\',true)">';
+  h+='<span class="nc-kind" style="color:'+kc+';background:'+kc+'18;border:1px solid '+kc+'33">'+n.kind+'</span>';
+  h+='<span class="nc-statement">'+esc(n.statement.substring(0,60))+(n.statement.length>60?'...':'')+'</span>';
+  if(n.keywords && n.keywords.length>0){
+    h+='<span class="nc-keywords">';
+    const kws=n.keywords.slice(0,3);
+    for(const k of kws) h+='<span>'+esc(k)+'</span>';
+    h+='</span>';
   }
-
-  var conn=edges.filter(function(e){return e.source===id||e.target===id});
-  var p=document.getElementById('panel');
-  var h='<h3 style="color:'+(KC[n.kind]||'#ccc')+'">['+n.kind+'] '+n.status+'</h3>';
-  h+='<div style="line-height:1.5;margin:8px 0">'+n.statement+'</div>';
-  if(n.keywords&&n.keywords.length){
-    h+='<div class="kw">'+n.keywords.map(function(k){return'<span>'+k+'</span>'}).join('')+'</div>';
-  }
-  if(n.metadata&&typeof n.metadata==='object'){
-    var m=n.metadata;
-    var keys=Object.keys(m).filter(function(k){return k!=='auto_generated'});
-    if(keys.length){
-      h+='<div style="margin:6px 0;font-size:11px;color:#8b949e">'+keys.map(function(k){return'<b>'+k+'</b>: '+JSON.stringify(m[k]).substring(0,40)}).join('<br>')+'</div>';
-    }
-  }
-  if(n.created_at){
-    h+='<div style="margin:4px 0;font-size:11px;color:#484f58">Created: '+new Date(n.created_at).toLocaleDateString()+'</div>';
-  }
-  h+='<h3 style="margin-top:10px">Connections ('+conn.length+')</h3>';
-  for(var i=0;i<conn.length;i++){
-    var e=conn[i];
-    var oid=e.source===id?e.target:e.source;
-    var o=nodes.find(function(x){return x.id===oid});
-    var dir=e.source===id?'->':'<-';
-    var ec=EC[e.kind]||'#484f58';
-    h+='<div class="ei" onclick="pick(\''+oid+'\')" style="border-left:2px solid '+ec+'">'+dir+' <span style="color:'+ec+'">['+e.kind+']</span> '+(o?o.statement.substring(0,30)+'...':oid.substring(0,8))+'</div>';
-  }
-  h+='<div style="margin-top:10px"><button class="btn b-red" style="font-size:11px" onclick="delNode(\''+id+'\')">Delete</button></div>';
-  p.innerHTML=h;
-  p.style.display='block';
+  h+='<span class="nc-status" style="color:'+sc+';background:'+sc+'22">'+n.status+'</span>';
+  h+='</div>';
+  return h;
 }
 
-async function delNode(id){
-  if(!confirm('Delete?'))return;
-  await fetch(API+'/api/graph/node/'+id,{method:'DELETE'});
-  sel=null;
-  document.getElementById('panel').style.display='none';
-  load();
-}
-
-// Search
+// --- Render: Search ---
 async function doSearch(){
-  var q=document.getElementById('q').value.trim();
-  var el=document.getElementById('search-results');
-  if(!q){el.style.display='none';return}
-  var d=await api('/api/graph/search?q='+encodeURIComponent(q)+'&top_k=10');
-  var r=d.results||[];
-  if(!r.length){el.innerHTML='<div style="color:#8b949e;padding:8px">No results</div>';el.style.display='block';return}
-  el.innerHTML='<h3 style="margin-bottom:6px;color:#58a6ff">Results: '+r.length+'</h3>'+r.map(function(x){
-    var c=KC[x.kind]||'#8b949e';
-    var id=x.node_id||x.id;
-    return'<div class="ni" onclick="pick(\''+id+'\')"><div class="dot" style="background:'+c+'"></div><div class="t">'+x.statement.substring(0,35)+'</div><div class="badge">'+((x.score||0).toFixed(2))+'</div></div>';
-  }).join('');
-  el.style.display='block';
+  const q=document.getElementById('q').value.trim();
+  if(!q){goHome();return}
+  const d=await api('/api/graph/search?q='+encodeURIComponent(q)+'&top_k=10');
+  const results=d.results||[];
+  currentView='search';
+  renderSidebar();
+  const c=document.getElementById('content');
+  let h=renderNavBar();
+  h+='<h2 style="font-size:18px;margin-bottom:16px;color:#e6edf3">검색 결과: "'+esc(q)+'" <span style="color:#8b949e;font-size:14px">('+results.length+'건)</span></h2>';
+  if(results.length===0){
+    h+='<div style="color:#8b949e;padding:20px 0">검색 결과가 없습니다.</div>';
+  } else {
+    for(const r of results){
+      const n=findNode(r.node_id||r.id)||r;
+      const kc=KC[n.kind]||'#8b949e';
+      const sc=SC[n.status]||'#8b949e';
+      const isFailed=n.status==='Rejected'||n.status==='Weakened';
+      h+='<div class="search-result-card'+(isFailed?' failed':'')+'" onclick="navigate(\''+(r.node_id||r.id)+'\',true)">';
+      h+='<span class="src-score">'+(r.score||0).toFixed(2)+'</span>';
+      h+='<span class="nc-kind" style="color:'+kc+';background:'+kc+'18;border:1px solid '+kc+'33">'+n.kind+'</span>';
+      h+='<span class="nc-statement" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px">'+esc(n.statement)+'</span>';
+      h+='<span class="nc-status" style="color:'+sc+';background:'+sc+'22;font-size:10px;padding:2px 8px;border-radius:10px">'+n.status+'</span>';
+      h+='</div>';
+    }
+  }
+  c.innerHTML=h;
 }
 
-// Yahoo
-async function addOne(){
-  var sym=document.getElementById('ysym').value.trim();
-  if(!sym)return;
+// --- Render: Node Wiki Page ---
+async function renderNodePage(nodeId){
+  const c=document.getElementById('content');
+  c.innerHTML='<div style="padding:40px;color:#8b949e">로딩 중...</div>';
+
+  let node=findNode(nodeId);
+  let edgesData;
+  try{
+    const detail=await api('/api/graph/node/'+nodeId);
+    if(detail.node) node=detail.node;
+    edgesData=detail.edges||[];
+  } catch(e){
+    edgesData=getEdgesFor(nodeId).map(e=>{
+      const otherId=e.source===nodeId?e.target:e.source;
+      const other=findNode(otherId);
+      return{...e,other_statement:other?other.statement:'',other_kind:other?other.kind:''};
+    });
+  }
+
+  if(!node){c.innerHTML='<div style="padding:40px;color:#8b949e">노드를 찾을 수 없습니다.</div>';return}
+
+  const sections=buildSectionsFromEdgeData(nodeId,edgesData);
+  const kc=KC[node.kind]||'#8b949e';
+  const sc=SC[node.status]||'#8b949e';
+  const isFailed=node.status==='Rejected'||node.status==='Weakened';
+
+  let h=renderNavBar();
+  h+=renderBreadcrumb();
+
+  // Header
+  h+='<div class="wiki-header" id="sec-info">';
+  h+='<div class="wiki-badges">';
+  h+='<span class="wiki-kind-badge" style="color:'+kc+';background:'+kc+'18;border:1px solid '+kc+'33">'+node.kind+'</span>';
+  h+='<span class="wiki-status-badge" style="color:'+sc+';background:'+sc+'22">'+node.status+'</span>';
+  h+='</div>';
+  h+='<div class="wiki-title"'+(isFailed?' style="text-decoration:line-through;opacity:.6"':'')+'>'+esc(node.statement)+'</div>';
+
+  // Keywords
+  if(node.keywords && node.keywords.length>0){
+    h+='<div class="wiki-keywords">';
+    for(const k of node.keywords){
+      h+='<span class="wiki-keyword" onclick="event.stopPropagation();document.getElementById(\'q\').value=\''+esc(k)+'\';doSearch()">'+esc(k)+'</span>';
+    }
+    h+='</div>';
+  }
+
+  // Metadata
+  if(node.metadata && typeof node.metadata==='object'){
+    const keys=Object.keys(node.metadata).filter(k=>k!=='auto_generated');
+    if(keys.length>0){
+      h+='<div class="wiki-metadata"><table>';
+      for(const k of keys){
+        let v=node.metadata[k];
+        if(typeof v==='object') v=JSON.stringify(v);
+        h+='<tr><td>'+esc(k)+'</td><td>'+esc(String(v))+'</td></tr>';
+      }
+      h+='</table></div>';
+    }
+  }
+
+  // Dates
+  h+='<div class="wiki-meta"><div class="wiki-meta-row">';
+  if(node.created_at) h+='<span>생성일: '+formatDate(node.created_at)+'</span>';
+  if(node.updated_at) h+='<span>수정일: '+formatDate(node.updated_at)+'</span>';
+  h+='</div></div>';
+
+  // Actions
+  h+='<div class="wiki-actions">';
+  h+='<select class="status-select" onchange="changeStatus(\''+nodeId+'\',this.value)">';
+  for(const s of ['Draft','Active','Accepted','Rejected','Weakened']){
+    h+='<option value="'+s+'"'+(node.status===s?' selected':'')+'>'+s+'</option>';
+  }
+  h+='</select>';
+  h+='<button class="btn b-red" style="font-size:12px;padding:4px 12px" onclick="deleteNode(\''+nodeId+'\')">삭제</button>';
+  h+='</div>';
+  h+='</div>'; // end wiki-header
+
+  // Sections
+  for(const s of sections){
+    if(s.items.length===0) continue;
+    h+='<div class="wiki-section" id="sec-'+s.key+'">';
+    h+='<div class="wiki-section-heading" style="--section-color:'+s.color+'" data-color>';
+    h+=s.label+' <span class="ws-count">('+s.items.length+')</span></div>';
+    for(const item of s.items){
+      h+=renderConnItem(item);
+    }
+    h+='</div>';
+  }
+
+  // Recommendations placeholder
+  h+='<div class="wiki-section" id="sec-rec">';
+  h+='<div class="wiki-section-heading" style="--section-color:#484f58" data-color>관련 추천 <span class="ws-count" id="rec-count">로딩...</span></div>';
+  h+='<div id="rec-list"><div style="color:#8b949e;font-size:13px;padding:8px">키워드 기반 추천을 불러오는 중...</div></div>';
+  h+='</div>';
+
+  c.innerHTML=h;
+
+  // Load recommendations async
+  loadRecommendations(node,edgesData);
+}
+
+function renderConnItem(item){
+  const kc=KC[item.kind]||'#8b949e';
+  const sc=SC[item.status]||'#8b949e';
+  const isFailed=item.status==='Rejected'||item.status==='Weakened';
+  let h='<div class="conn-item'+(isFailed?' ci-failed':'')+'" onclick="navigate(\''+item.nodeId+'\',true)">';
+  h+='<span class="ci-arrow">'+item.arrow+'</span>';
+  h+='<span class="ci-kind" style="color:'+kc+';background:'+kc+'18">'+item.kind+'</span>';
+  h+='<div class="ci-body">';
+  h+='<span class="ci-statement">'+esc(item.statement)+'</span>';
+  h+=' <span class="ci-status" style="color:'+sc+';background:'+sc+'22">'+item.status+'</span>';
+  if(item.note) h+='<div class="ci-note">'+esc(item.note)+'</div>';
+  h+='</div></div>';
+  return h;
+}
+
+async function loadRecommendations(node, edgesData){
+  const connIds=new Set();
+  connIds.add(node.id);
+  edgesData.forEach(e=>{
+    const otherId=e.source===node.id?e.target:e.source;
+    connIds.add(otherId);
+  });
+
+  const keywords=(node.keywords||[]).slice(0,3).join(' ');
+  if(!keywords){
+    document.getElementById('rec-list').innerHTML='<div style="color:#8b949e;font-size:13px;padding:8px">키워드가 없어 추천을 생성할 수 없습니다.</div>';
+    document.getElementById('rec-count').textContent='0';
+    const tocRec=document.getElementById('toc-rec-count');
+    if(tocRec) tocRec.textContent='0';
+    return;
+  }
+
+  try{
+    const d=await api('/api/graph/search?q='+encodeURIComponent(keywords)+'&top_k=15');
+    const results=(d.results||[]).filter(r=>{
+      const rid=r.node_id||r.id;
+      return !connIds.has(rid);
+    }).slice(0,5);
+
+    const el=document.getElementById('rec-list');
+    const countEl=document.getElementById('rec-count');
+    const tocRec=document.getElementById('toc-rec-count');
+
+    if(results.length===0){
+      el.innerHTML='<div style="color:#8b949e;font-size:13px;padding:8px">관련 추천 노드가 없습니다.</div>';
+      countEl.textContent='0';
+      if(tocRec) tocRec.textContent='0';
+      return;
+    }
+
+    countEl.textContent=results.length+'';
+    if(tocRec) tocRec.textContent=results.length+'';
+
+    let rh='';
+    for(const r of results){
+      const n=findNode(r.node_id||r.id)||r;
+      const kc=KC[n.kind]||'#8b949e';
+      rh+='<div class="rec-item" onclick="navigate(\''+(r.node_id||r.id)+'\',true)" style="border-left-color:'+kc+'">';
+      rh+='<span class="nc-kind" style="color:'+kc+';background:'+kc+'18;border:1px solid '+kc+'33;font-size:10px;padding:2px 6px;border-radius:3px">'+n.kind+'</span>';
+      rh+='<span style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(n.statement)+'</span>';
+      rh+='<span class="src-score" style="font-size:10px">'+(r.score||0).toFixed(2)+'</span>';
+      rh+='</div>';
+    }
+    el.innerHTML=rh;
+  } catch(e){
+    document.getElementById('rec-list').innerHTML='<div style="color:#8b949e;font-size:13px;padding:8px">추천을 불러오지 못했습니다.</div>';
+    document.getElementById('rec-count').textContent='0';
+    const tocRec=document.getElementById('toc-rec-count');
+    if(tocRec) tocRec.textContent='0';
+  }
+}
+
+// --- Build sections from edge data ---
+function buildSectionsFromEdgeData(nodeId, edgesData){
+  const sections=[
+    {key:'support-in',label:'지지 근거 (Support)',color:EKC.Support,edgeKind:'Support',dir:'in',items:[]},
+    {key:'rebut-in',label:'반론 (Rebut)',color:EKC.Rebut,edgeKind:'Rebut',dir:'in',items:[]},
+    {key:'support-out',label:'이 노드가 지지하는',color:EKC.Support,edgeKind:'Support',dir:'out',items:[]},
+    {key:'rebut-out',label:'이 노드가 반박하는',color:EKC.Rebut,edgeKind:'Rebut',dir:'out',items:[]},
+    {key:'depends-out',label:'이 노드가 의존하는 (DependsOn)',color:EKC.DependsOn,edgeKind:'DependsOn',dir:'out',items:[]},
+    {key:'depends-in',label:'이 노드에 의존하는',color:EKC.DependsOn,edgeKind:'DependsOn',dir:'in',items:[]},
+    {key:'derived-in',label:'파생된 (DerivedFrom → 이 노드)',color:EKC.DerivedFrom,edgeKind:'DerivedFrom',dir:'in',items:[]},
+    {key:'derived-out',label:'이 노드에서 파생 (DerivedFrom)',color:EKC.DerivedFrom,edgeKind:'DerivedFrom',dir:'out',items:[]},
+    {key:'refines-in',label:'이 노드를 구체화하는 (Refines)',color:EKC.Refines,edgeKind:'Refines',dir:'in',items:[]},
+    {key:'refines-out',label:'이 노드가 구체화하는',color:EKC.Refines,edgeKind:'Refines',dir:'out',items:[]},
+    {key:'contradicts',label:'충돌 (Contradicts)',color:EKC.Contradicts,edgeKind:'Contradicts',dir:'both',items:[]},
+  ];
+
+  for(const e of edgesData){
+    const isSource=e.source===nodeId;
+    const isTarget=e.target===nodeId;
+    const otherId=isSource?e.target:e.source;
+    const otherNode=findNode(otherId);
+    const otherStatement=e.other_statement||(otherNode?otherNode.statement:otherId.substring(0,8)+'...');
+    const otherKind=e.other_kind||(otherNode?otherNode.kind:'');
+    const otherStatus=otherNode?otherNode.status:'';
+
+    const item={
+      nodeId:otherId,
+      kind:otherKind,
+      statement:otherStatement,
+      status:otherStatus,
+      note:e.note||'',
+      arrow:isSource?'→':'←'
+    };
+
+    for(const s of sections){
+      if(s.edgeKind!==e.kind) continue;
+      if(s.dir==='in' && isTarget){ s.items.push(item); break; }
+      if(s.dir==='out' && isSource){ s.items.push(item); break; }
+      if(s.dir==='both'){ s.items.push(item); break; }
+    }
+  }
+  return sections;
+}
+
+function buildSections(nodeId, edges){
+  return buildSectionsFromEdgeData(nodeId, edges.map(e=>{
+    const otherId=e.source===nodeId?e.target:e.source;
+    const other=findNode(otherId);
+    return{...e, other_statement:other?other.statement:'', other_kind:other?other.kind:''};
+  }));
+}
+
+// --- Nav bar ---
+function renderNavBar(){
+  let h='<div class="nav-bar">';
+  h+='<button class="nav-btn" onclick="goBack()"'+(historyIdx<=0?' disabled':'')+'>← 뒤로</button>';
+  h+='<button class="nav-btn" onclick="goForward()"'+(historyIdx>=history.length-1?' disabled':'')+'>앞으로 →</button>';
+  h+='<button class="nav-btn" onclick="goHome()">🏠 홈</button>';
+  h+='</div>';
+  return h;
+}
+
+function renderBreadcrumb(){
+  if(history.length<=1) return '';
+  const show=history.slice(Math.max(0,historyIdx-4),historyIdx+1);
+  let h='<div class="breadcrumb">';
+  h+='<a onclick="goHome()">홈</a><span class="bc-sep">/</span>';
+  for(let i=0;i<show.length;i++){
+    const id=show[i];
+    const n=findNode(id);
+    const label=n?n.statement.substring(0,20)+(n.statement.length>20?'...':''):id.substring(0,8);
+    if(i===show.length-1){
+      h+='<span style="color:#c9d1d9">'+esc(label)+'</span>';
+    } else {
+      h+='<a onclick="navigate(\''+id+'\',true)">'+esc(label)+'</a><span class="bc-sep">/</span>';
+    }
+  }
+  h+='</div>';
+  return h;
+}
+
+// --- Actions ---
+async function changeStatus(nodeId, status){
+  await patch('/api/graph/node/'+nodeId,{status:status});
+  await loadAll();
+  renderNodePage(nodeId);
+  renderSidebar();
+}
+
+async function deleteNode(nodeId){
+  if(!confirm('이 노드를 삭제하시겠습니까?')) return;
+  await del('/api/graph/node/'+nodeId);
+  await loadAll();
+  goHome();
+}
+
+async function addSymbol(){
+  const sym=document.getElementById('ysym').value.trim();
+  if(!sym) return;
   document.getElementById('ysym').value='';
-  var d=await post('/api/yahoo/fetch',{symbol:sym});
-  if(d.error)alert(d.error);else load();
+  try{
+    const d=await post('/api/yahoo/fetch',{symbol:sym});
+    if(d.error) alert(d.error);
+    else{await loadAll();if(currentView==='home')renderHome()}
+  } catch(e){alert('오류: '+e.message)}
 }
 
 async function batchYahoo(){
-  var input=prompt('종목 목록 (쉼표 구분):\n예: AAPL,MSFT,GOOGL,AMZN,TSLA,NVDA,META,JPM,KO,XOM,SPY,QQQ');
-  if(!input)return;
-  var symbols=input.split(',').map(function(s){return s.trim()}).filter(function(s){return s});
-  var d=await post('/api/yahoo/batch',{symbols:symbols});
-  alert('Created: '+d.n_created+' facts'+(d.errors&&d.errors.length?' / Errors: '+d.errors.length:''));
-  load();
+  const input=prompt('종목 목록 (쉼표 구분):\n예: AAPL,MSFT,GOOGL,AMZN,TSLA,NVDA,META,JPM,KO,XOM,SPY,QQQ');
+  if(!input) return;
+  const symbols=input.split(',').map(s=>s.trim()).filter(s=>s);
+  try{
+    const d=await post('/api/yahoo/batch',{symbols:symbols});
+    alert('생성: '+d.n_created+' facts'+(d.errors&&d.errors.length?' / 오류: '+d.errors.length:''));
+    await loadAll();
+    if(currentView==='home') renderHome();
+  } catch(e){alert('오류: '+e.message)}
 }
 
 async function autoOrganize(){
-  var d=await post('/api/yahoo/auto-organize',{});
-  if(d.error){alert(d.error);return}
-  alert('Auto-organized: '+d.claims_created+' claims, '+d.edges_created+' edges created');
-  load();
+  try{
+    const d=await post('/api/yahoo/auto-organize',{});
+    if(d.error){alert(d.error);return}
+    alert('자동 정리: '+d.claims_created+' claims, '+d.edges_created+' edges 생성');
+    await loadAll();
+    if(currentView==='home') renderHome();
+  } catch(e){alert('오류: '+e.message)}
 }
 
-load();
+// --- Utilities ---
+function esc(s){
+  if(!s) return '';
+  const d=document.createElement('div');
+  d.textContent=s;
+  return d.innerHTML;
+}
+
+function formatDate(d){
+  if(!d) return '';
+  const dt=new Date(d);
+  return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0')+' '+String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0');
+}
+
+// --- Init ---
+async function init(){
+  await loadAll();
+  const hash=window.location.hash.slice(1);
+  if(hash){
+    navigate(hash,true);
+  } else {
+    navigate(null,true);
+  }
+}
+
+init();
 </script>
 </body>
 </html>
