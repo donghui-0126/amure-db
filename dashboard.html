@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>amure-db</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d1117;color:#c9d1d9;overflow:hidden;height:100vh}
+.top{background:#161b22;padding:10px 20px;border-bottom:1px solid #30363d;display:flex;align-items:center;gap:12px;height:50px}
+.top h1{font-size:18px;color:#58a6ff}
+.top input{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:6px 12px;border-radius:6px;font-size:14px;width:300px}
+.top .st{font-size:13px;color:#8b949e;margin-left:auto;display:flex;gap:14px}
+.top .st span{color:#58a6ff}
+.btn{padding:6px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500}
+.btn:hover{opacity:0.85}
+.b-blue{background:#1f6feb;color:#fff}
+.b-green{background:#238636;color:#fff}
+.b-orange{background:#9e6a03;color:#fff}
+.b-red{background:#da3633;color:#fff}
+.main{display:flex;height:calc(100vh - 50px)}
+.side{width:340px;background:#161b22;border-right:1px solid #30363d;overflow-y:auto;flex-shrink:0;padding:12px}
+.side h3{font-size:12px;color:#8b949e;margin:12px 0 6px;text-transform:uppercase;letter-spacing:0.5px}
+.ni{padding:6px 8px;margin:2px 0;border-radius:4px;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:6px}
+.ni:hover{background:#1f6feb22}
+.ni.sel{background:#1f6feb33;border:1px solid #1f6feb}
+.dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.ni .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge{font-size:10px;padding:1px 6px;border-radius:8px;background:#30363d}
+.canvas{flex:1;position:relative}
+svg{width:100%;height:100%}
+.panel{position:absolute;top:10px;right:10px;width:320px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;font-size:13px;display:none;max-height:80vh;overflow-y:auto}
+.panel h3{color:#58a6ff;font-size:15px;margin-bottom:8px}
+.panel .kw{display:flex;flex-wrap:wrap;gap:3px;margin:6px 0}
+.panel .kw span{background:#30363d;padding:2px 6px;border-radius:3px;font-size:11px}
+.ei{padding:4px 6px;margin:2px 0;border-radius:3px;background:#0d1117;font-size:12px;cursor:pointer}
+.ei:hover{background:#1f6feb22}
+.legend{display:flex;gap:8px;flex-wrap:wrap;font-size:11px;margin-bottom:8px}
+.legend .i{display:flex;align-items:center;gap:3px}
+.legend .c{width:10px;height:10px;border-radius:50%}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>amure-db</h1>
+  <input id="q" placeholder="Graph RAG search (동의어 자동 확장)..." onkeydown="if(event.key==='Enter')doSearch()">
+  <button class="btn b-blue" onclick="doSearch()">Search</button>
+  <button class="btn b-green" onclick="batchYahoo()">Batch Yahoo</button>
+  <button class="btn b-orange" onclick="autoOrganize()">Auto Organize</button>
+  <div class="st">
+    <div>Nodes: <span id="sn">0</span></div>
+    <div>Edges: <span id="se">0</span></div>
+  </div>
+</div>
+<div class="main">
+  <div class="side">
+    <div class="legend">
+      <div class="i"><div class="c" style="background:#58a6ff"></div>Claim</div>
+      <div class="i"><div class="c" style="background:#d2a8ff"></div>Reason</div>
+      <div class="i"><div class="c" style="background:#8b949e"></div>Evidence</div>
+      <div class="i"><div class="c" style="background:#f0883e"></div>Experiment</div>
+      <div class="i"><div class="c" style="background:#3fb950"></div>Fact</div>
+    </div>
+    <div style="margin-bottom:8px">
+      <input id="ysym" placeholder="Symbol (AAPL, MSFT...)" style="width:60%;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 8px;border-radius:4px;font-size:12px">
+      <button class="btn b-green" style="font-size:11px;padding:4px 8px" onclick="addOne()">+ Add</button>
+    </div>
+    <div id="sidebar-content"></div>
+    <div id="search-results" style="display:none"></div>
+  </div>
+  <div class="canvas">
+    <svg id="svg"><defs>
+      <marker id="a-s" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto"><path d="M0,0 L6,2 L0,4" fill="#3fb950"/></marker>
+      <marker id="a-r" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto"><path d="M0,0 L6,2 L0,4" fill="#f85149"/></marker>
+      <marker id="a-d" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto"><path d="M0,0 L6,2 L0,4" fill="#484f58"/></marker>
+    </defs><g id="gg"><g id="el"></g><g id="nl"></g></g></svg>
+    <div class="panel" id="panel"></div>
+  </div>
+</div>
+<script>
+const API='';
+async function api(p){return(await fetch(API+p)).json()}
+async function post(p,b){return(await fetch(API+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json()}
+
+const KC={Claim:'#58a6ff',Reason:'#d2a8ff',Evidence:'#8b949e',Experiment:'#f0883e',Fact:'#3fb950'};
+const EC={Support:'#3fb950',Rebut:'#f85149',DependsOn:'#484f58',DerivedFrom:'#f0883e',Contradicts:'#f85149',Refines:'#58a6ff'};
+let nodes=[],edges=[],sim=[],simE=[],sel=null,zoom=1,px=0,py=0,drag=null,pan=false,ps=null,iter=0;
+
+async function load(){
+  const d=await api('/api/graph/all');
+  nodes=d.nodes||[];edges=d.edges||[];
+  document.getElementById('sn').textContent=nodes.length;
+  document.getElementById('se').textContent=edges.length;
+  renderSide();initSim();tick();
+}
+
+function renderSide(){
+  const groups={};
+  nodes.forEach(n=>{const k=n.kind;if(!groups[k])groups[k]=[];groups[k].push(n)});
+  let h='';
+  for(const[kind,list]of Object.entries(groups).sort()){
+    h+='<h3>'+kind+' ('+list.length+')</h3>';
+    list.slice(0,30).forEach(n=>{
+      const c=KC[n.kind]||'#8b949e';
+      h+='<div class="ni'+(n.id===sel?' sel':'')+'" onclick="pick(\''+n.id+'\')" style="'+(n.failed?'opacity:0.5':'')+'">';
+      h+='<div class="dot" style="background:'+c+'"></div>';
+      h+='<div class="t">'+n.statement.substring(0,35)+(n.statement.length>35?'...':'')+'</div>';
+      h+='<div class="badge">'+n.status+'</div></div>';
+    });
+    if(list.length>30)h+='<div style="color:#8b949e;font-size:11px;padding:4px">+' +(list.length-30)+' more</div>';
+  }
+  document.getElementById('sidebar-content').innerHTML=h;
+}
+
+function pick(id){
+  sel=id;renderSide();
+  const n=nodes.find(x=>x.id===id);if(!n)return;
+  const conn=edges.filter(e=>e.source===id||e.target===id);
+  const p=document.getElementById('panel');
+  let h='<h3 style="color:'+(KC[n.kind]||'#ccc')+'">['+n.kind+'] '+n.status+'</h3>';
+  h+='<div style="line-height:1.5;margin:8px 0">'+n.statement+'</div>';
+  if(n.keywords&&n.keywords.length)h+='<div class="kw">'+n.keywords.map(k=>'<span>'+k+'</span>').join('')+'</div>';
+  if(n.metadata&&typeof n.metadata==='object'){
+    const m=n.metadata;
+    const keys=Object.keys(m).filter(k=>k!=='auto_generated');
+    if(keys.length)h+='<div style="margin:6px 0;font-size:11px;color:#8b949e">'+keys.map(k=>'<b>'+k+'</b>: '+JSON.stringify(m[k]).substring(0,40)).join('<br>')+'</div>';
+  }
+  h+='<h3 style="margin-top:10px">Connections ('+conn.length+')</h3>';
+  conn.forEach(e=>{
+    const oid=e.source===id?e.target:e.source;
+    const o=nodes.find(x=>x.id===oid);
+    const dir=e.source===id?'->':'<-';
+    const ec=EC[e.kind]||'#484f58';
+    h+='<div class="ei" onclick="pick(\''+oid+'\')" style="border-left:2px solid '+ec+'">'+dir+' <span style="color:'+ec+'">['+e.kind+']</span> '+(o?o.statement.substring(0,30)+'...':oid.substring(0,8))+'</div>';
+  });
+  h+='<div style="margin-top:10px"><button class="btn b-red" style="font-size:11px" onclick="delNode(\''+id+'\')">Delete</button></div>';
+  p.innerHTML=h;p.style.display='block';
+  const sn=sim.find(x=>x.id===id);
+  if(sn){const sv=document.getElementById('svg');px=sv.clientWidth/2-sn.x*zoom;py=sv.clientHeight/2-sn.y*zoom;render()}
+}
+
+async function delNode(id){if(!confirm('Delete?'))return;await fetch(API+'/api/graph/node/'+id,{method:'DELETE'});sel=null;document.getElementById('panel').style.display='none';load();}
+
+// Force sim
+function initSim(){
+  const sv=document.getElementById('svg');const w=sv.clientWidth,h=sv.clientHeight,cx=w/2,cy=h/2;
+  const claims=nodes.filter(n=>n.kind==='Claim');const others=nodes.filter(n=>n.kind!=='Claim');
+  sim=[];
+  claims.forEach((n,i)=>{const a=i/Math.max(claims.length,1)*Math.PI*2;sim.push({id:n.id,x:cx+Math.cos(a)*120,y:cy+Math.sin(a)*120,vx:0,vy:0})});
+  others.forEach((n,i)=>{const a=i/Math.max(others.length,1)*Math.PI*2;sim.push({id:n.id,x:cx+Math.cos(a)*300+(Math.random()-.5)*80,y:cy+Math.sin(a)*300+(Math.random()-.5)*80,vx:0,vy:0})});
+  const idx={};sim.forEach((n,i)=>idx[n.id]=i);
+  simE=edges.filter(e=>idx[e.source]!==undefined&&idx[e.target]!==undefined).map(e=>({s:idx[e.source],t:idx[e.target],k:e.kind}));
+  iter=0;px=0;py=0;zoom=1;
+}
+
+function step(){
+  const N=sim.length,a=Math.max(0.01,1-iter/400);
+  for(let i=0;i<N;i++)for(let j=i+1;j<N;j++){let dx=sim[j].x-sim[i].x,dy=sim[j].y-sim[i].y,d=Math.sqrt(dx*dx+dy*dy)||1,f=4000/(d*d)*a,fx=dx/d*f,fy=dy/d*f;sim[i].vx-=fx;sim[i].vy-=fy;sim[j].vx+=fx;sim[j].vy+=fy}
+  simE.forEach(e=>{let a2=sim[e.s],b=sim[e.t],dx=b.x-a2.x,dy=b.y-a2.y,d=Math.sqrt(dx*dx+dy*dy)||1,f=(d-100)*0.03*a,fx=dx/d*f,fy=dy/d*f;a2.vx+=fx;a2.vy+=fy;b.vx-=fx;b.vy-=fy});
+  const sv=document.getElementById('svg'),cx=sv.clientWidth/2,cy=sv.clientHeight/2;
+  sim.forEach(n=>{if(drag&&n.id===drag)return;n.vx+=(cx-n.x)*.005*a;n.vy+=(cy-n.y)*.005*a;n.vx*=.8;n.vy*=.8;n.x+=n.vx;n.y+=n.vy});
+  iter++;
+}
+
+function tick(){if(iter<400)step();render();requestAnimationFrame(tick)}
+
+function render(){
+  document.getElementById('gg').setAttribute('transform','translate('+px+','+py+') scale('+zoom+')');
+  const deg={};sim.forEach(n=>deg[n.id]=0);simE.forEach(e=>{deg[sim[e.s].id]++;deg[sim[e.t].id]++});
+  let eh='';simE.forEach(e=>{const a=sim[e.s],b=sim[e.t],c=EC[e.k]||'#484f58',ds=e.k==='Contradicts'?'stroke-dasharray="4,3"':'',mk=e.k==='Support'?'a-s':e.k==='Rebut'?'a-r':'a-d';
+    eh+='<line x1="'+a.x+'" y1="'+a.y+'" x2="'+b.x+'" y2="'+b.y+'" stroke="'+c+'" stroke-width="1.5" '+ds+' marker-end="url(#'+mk+')" opacity="0.5"/>'});
+  document.getElementById('el').innerHTML=eh;
+  let nh='';sim.forEach(sn=>{const n=nodes.find(x=>x.id===sn.id);if(!n)return;const c=KC[n.kind]||'#8b949e',r=Math.min(5+(deg[n.id]||0)*1.5,18),s=n.id===sel,op=n.failed?.3:1,sd=n.failed?'stroke-dasharray="3,2"':'',lb=n.statement.substring(0,10)+(n.statement.length>10?'..':'');
+    nh+='<g class="gn" data-id="'+n.id+'" style="cursor:pointer"><circle cx="'+sn.x+'" cy="'+sn.y+'" r="'+r+'" fill="'+c+'" opacity="'+op+'" stroke="'+(s?'#fff':c)+'" stroke-width="'+(s?2.5:1)+'" '+sd+'/>';
+    nh+='<text x="'+sn.x+'" y="'+(sn.y+r+11)+'" text-anchor="middle" fill="#8b949e" font-size="9" opacity="'+(op*.8)+'">'+lb+'</text></g>'});
+  document.getElementById('nl').innerHTML=nh;
+}
+
+// Interaction
+const svg=document.getElementById('svg');
+svg.addEventListener('wheel',e=>{e.preventDefault();const d=e.deltaY>0?.9:1.1,nz=Math.max(.1,Math.min(5,zoom*d)),rc=svg.getBoundingClientRect(),mx=e.clientX-rc.left,my=e.clientY-rc.top;px=mx-(mx-px)*(nz/zoom);py=my-(my-py)*(nz/zoom);zoom=nz;render()});
+svg.addEventListener('mousedown',e=>{const t=e.target.closest('.gn');if(t){drag=t.getAttribute('data-id');pick(drag)}else{pan=true;ps={x:e.clientX-px,y:e.clientY-py};sel=null;document.getElementById('panel').style.display='none';renderSide()}});
+svg.addEventListener('mousemove',e=>{if(drag){const rc=svg.getBoundingClientRect(),sn=sim.find(n=>n.id===drag);if(sn){sn.x=(e.clientX-rc.left-px)/zoom;sn.y=(e.clientY-rc.top-py)/zoom;sn.vx=0;sn.vy=0;iter=Math.max(0,iter-50)}}if(pan&&ps){px=e.clientX-ps.x;py=e.clientY-ps.y;render()}});
+window.addEventListener('mouseup',()=>{drag=null;pan=false;ps=null});
+
+// Search
+async function doSearch(){
+  const q=document.getElementById('q').value.trim();
+  const el=document.getElementById('search-results');
+  if(!q){el.style.display='none';return}
+  const d=await api('/api/graph/search?q='+encodeURIComponent(q)+'&top_k=10');
+  const r=d.results||[];
+  if(!r.length){el.innerHTML='<div style="color:#8b949e;padding:8px">No results</div>';el.style.display='block';return}
+  el.innerHTML='<h3 style="margin-bottom:6px;color:#58a6ff">Results: '+r.length+'</h3>'+r.map(x=>{
+    const c=KC[x.kind]||'#8b949e';const id=x.node_id||x.id;
+    return'<div class="ni" onclick="pick(\''+id+'\')"><div class="dot" style="background:'+c+'"></div><div class="t">'+x.statement.substring(0,35)+'</div><div class="badge">'+((x.score||0).toFixed(2))+'</div></div>'
+  }).join('');
+  el.style.display='block';
+}
+
+// Yahoo
+async function addOne(){
+  const sym=document.getElementById('ysym').value.trim();if(!sym)return;
+  document.getElementById('ysym').value='';
+  const d=await post('/api/yahoo/fetch',{symbol:sym});
+  if(d.error)alert(d.error);else load();
+}
+
+async function batchYahoo(){
+  const input=prompt('종목 목록 (쉼표 구분):\n예: AAPL,MSFT,GOOGL,AMZN,TSLA,NVDA,META,JPM,KO,XOM,SPY,QQQ');
+  if(!input)return;
+  const symbols=input.split(',').map(s=>s.trim()).filter(s=>s);
+  const d=await post('/api/yahoo/batch',{symbols});
+  alert('Created: '+d.n_created+' facts'+(d.errors?.length?' / Errors: '+d.errors.length:''));
+  load();
+}
+
+async function autoOrganize(){
+  const d=await post('/api/yahoo/auto-organize',{});
+  if(d.error){alert(d.error);return}
+  alert('Auto-organized: '+d.claims_created+' claims, '+d.edges_created+' edges created');
+  load();
+}
+
+load();
+</script>
+</body>
+</html>
