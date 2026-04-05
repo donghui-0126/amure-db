@@ -366,6 +366,265 @@ impl AmureGraph {
         }).collect()
     }
 
+    // ── [1] Verdict → Reason 상태 전파 ────────────────────────────────
+
+    /// 실험 verdict 후 상위 Reason/Claim 상태를 자동 업데이트.
+    /// 반환: (reason_id, reason_new_status, claim_id, claim_recommendation)
+    pub fn propagate_verdict(&mut self, experiment_id: &Uuid) -> Option<VerdictPropagation> {
+        // 1. Experiment → Reason (DependsOn 엣지 따라감)
+        let reason_id = {
+            let neighbors = self.neighbors(experiment_id, Direction::Out, Some(&[EdgeKind::DependsOn]));
+            neighbors.first().map(|(id, _)| *id)?
+        };
+
+        // 2. Reason 하위의 모든 Experiment 상태 집계
+        let experiments: Vec<(Uuid, NodeStatus)> = self
+            .neighbors(&reason_id, Direction::In, Some(&[EdgeKind::DependsOn]))
+            .iter()
+            .filter_map(|(id, _)| {
+                let n = self.nodes.get(id)?;
+                if n.kind == NodeKind::Experiment {
+                    Some((*id, n.status))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let n_total = experiments.len();
+        let n_accepted = experiments.iter().filter(|(_, s)| *s == NodeStatus::Accepted).count();
+        let n_weakened = experiments.iter().filter(|(_, s)| *s == NodeStatus::Weakened).count();
+        let n_resolved = n_accepted + n_weakened;
+
+        // 3. Reason 상태 결정 (다수결)
+        let reason_status = if n_resolved == 0 {
+            NodeStatus::Active
+        } else if n_accepted > n_weakened {
+            NodeStatus::Accepted // "Supported"
+        } else {
+            NodeStatus::Weakened
+        };
+
+        // Reason 상태 업데이트
+        if let Some(reason) = self.nodes.get_mut(&reason_id) {
+            reason.status = reason_status;
+            reason.updated_at = chrono::Utc::now();
+        }
+
+        // 4. Reason → Claim (Support/Rebut 엣지 따라감)
+        let claim_id = {
+            let neighbors = self.neighbors(&reason_id, Direction::Out, Some(&[EdgeKind::Support, EdgeKind::Rebut]));
+            neighbors.first().map(|(id, _)| *id)
+        };
+
+        // 5. Claim의 모든 Reason 상태 집계 → 추천
+        let claim_recommendation = if let Some(cid) = claim_id {
+            let reasons: Vec<(NodeStatus, EdgeKind)> = self
+                .neighbors(&cid, Direction::In, Some(&[EdgeKind::Support, EdgeKind::Rebut]))
+                .iter()
+                .filter_map(|(id, edge)| {
+                    let n = self.nodes.get(id)?;
+                    if n.kind == NodeKind::Reason {
+                        Some((n.status, edge.kind))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let n_support_accepted = reasons.iter()
+                .filter(|(s, k)| *s == NodeStatus::Accepted && *k == EdgeKind::Support).count();
+            let n_support_weakened = reasons.iter()
+                .filter(|(s, k)| *s == NodeStatus::Weakened && *k == EdgeKind::Support).count();
+            let n_rebut_accepted = reasons.iter()
+                .filter(|(s, k)| *s == NodeStatus::Accepted && *k == EdgeKind::Rebut).count();
+            let n_active = reasons.iter().filter(|(s, _)| *s == NodeStatus::Active).count();
+
+            if n_active > 0 {
+                "pending".to_string() // 아직 미완료 Reason 있음
+            } else if n_rebut_accepted > 0 {
+                "reject".to_string() // 반박이 지지됨 → 기각 추천
+            } else if n_support_accepted > 0 && n_support_weakened == 0 {
+                "accept".to_string() // 모든 지지 근거가 확인됨
+            } else if n_support_accepted > n_support_weakened {
+                "lean_accept".to_string() // 다수 지지
+            } else {
+                "lean_reject".to_string() // 다수 약화
+            }
+        } else {
+            "no_claim".to_string()
+        };
+
+        Some(VerdictPropagation {
+            experiment_id: *experiment_id,
+            reason_id,
+            reason_status: format!("{:?}", reason_status),
+            n_experiments: n_total,
+            n_accepted,
+            n_weakened,
+            claim_id,
+            claim_recommendation,
+        })
+    }
+
+    // ── [2] Claim 간 DependsOn 자동 감지 ────────────────────────────
+
+    /// 새 Claim의 키워드와 기존 Accepted Claim들을 비교 → DependsOn 엣지 자동 생성.
+    /// 반환: 생성된 (edge_id, target_claim_id, overlap_keywords) 목록
+    pub fn detect_claim_dependencies(&mut self, new_claim_id: &Uuid) -> Vec<DependencyDetection> {
+        let (new_kws, new_stmt) = {
+            let node = match self.nodes.get(new_claim_id) {
+                Some(n) if n.kind == NodeKind::Claim => n,
+                _ => return Vec::new(),
+            };
+            let kws: HashSet<String> = node.keywords.iter().map(|k| k.to_lowercase()).collect();
+            (kws, node.statement.clone())
+        };
+
+        if new_kws.is_empty() { return Vec::new(); }
+
+        // 기존 Accepted Claim 수집
+        let candidates: Vec<(Uuid, HashSet<String>, String)> = self.nodes.values()
+            .filter(|n| {
+                n.kind == NodeKind::Claim
+                    && n.status == NodeStatus::Accepted
+                    && n.id != *new_claim_id
+            })
+            .map(|n| {
+                let kws: HashSet<String> = n.keywords.iter().map(|k| k.to_lowercase()).collect();
+                (n.id, kws, n.statement.clone())
+            })
+            .collect();
+
+        let mut results = Vec::new();
+
+        for (cid, cand_kws, cand_stmt) in &candidates {
+            let overlap: Vec<String> = new_kws.intersection(cand_kws).cloned().collect();
+            let union_size = new_kws.union(cand_kws).count();
+            let jaccard = if union_size > 0 { overlap.len() as f64 / union_size as f64 } else { 0.0 };
+
+            // Jaccard > 0.3 이고 overlap 2개 이상
+            if jaccard > 0.3 && overlap.len() >= 2 {
+                // 이미 DependsOn 엣지가 있는지 확인
+                let already_exists = self.edges.values().any(|e| {
+                    e.kind == EdgeKind::DependsOn
+                        && ((e.source == *new_claim_id && e.target == *cid)
+                            || (e.source == *cid && e.target == *new_claim_id))
+                });
+
+                if !already_exists {
+                    let edge_id = self.add_edge(
+                        Edge::new(*new_claim_id, *cid, EdgeKind::DependsOn)
+                            .with_weight(jaccard)
+                            .with_note(format!("자동 감지: 키워드 겹침({})", overlap.join(",")))
+                    );
+
+                    results.push(DependencyDetection {
+                        edge_id,
+                        source_id: *new_claim_id,
+                        source_statement: new_stmt.clone(),
+                        target_id: *cid,
+                        target_statement: cand_stmt.clone(),
+                        overlap_keywords: overlap,
+                        jaccard,
+                    });
+                }
+            }
+        }
+
+        results.sort_by(|a, b| b.jaccard.partial_cmp(&a.jaccard).unwrap_or(std::cmp::Ordering::Equal));
+        results
+    }
+
+    // ── [3] Knowledge 승격 시 관계 엣지 ─────────────────────────────
+
+    /// Claim이 Accept될 때 기존 Accepted Claim들과 관계 엣지 자동 생성.
+    /// - 같은 방향 + 키워드 겹침 → Support
+    /// - 더 구체적 (키워드 포함관계) → Refines
+    /// - 방향 충돌 → Contradicts
+    pub fn on_accept(&mut self, claim_id: &Uuid) -> Vec<AcceptRelation> {
+        let (kws, _stmt, is_reversal) = {
+            let node = match self.nodes.get(claim_id) {
+                Some(n) if n.kind == NodeKind::Claim => n,
+                _ => return Vec::new(),
+            };
+            let kws: HashSet<String> = node.keywords.iter()
+                .filter(|k| !["validated", "disproven", "gap_derived", "auto_generated"].contains(&k.as_str()))
+                .map(|k| k.to_lowercase())
+                .collect();
+            let is_rev = node.statement.contains("reversal") || node.statement.contains("반전") || node.statement.contains("회귀");
+            (kws, node.statement.clone(), is_rev)
+        };
+
+        if kws.is_empty() { return Vec::new(); }
+
+        // 다른 Accepted Claim들
+        let others: Vec<(Uuid, HashSet<String>, String, bool)> = self.nodes.values()
+            .filter(|n| {
+                n.kind == NodeKind::Claim
+                    && n.status == NodeStatus::Accepted
+                    && n.id != *claim_id
+            })
+            .map(|n| {
+                let k: HashSet<String> = n.keywords.iter()
+                    .filter(|k| !["validated", "disproven", "gap_derived", "auto_generated"].contains(&k.as_str()))
+                    .map(|k| k.to_lowercase())
+                    .collect();
+                let rev = n.statement.contains("reversal") || n.statement.contains("반전") || n.statement.contains("회귀");
+                (n.id, k, n.statement.clone(), rev)
+            })
+            .collect();
+
+        let mut relations = Vec::new();
+
+        for (oid, okws, ostmt, o_rev) in &others {
+            let overlap: Vec<String> = kws.intersection(okws).cloned().collect();
+            if overlap.len() < 2 { continue; }
+
+            // 이미 관계 엣지가 있는지 확인
+            let has_existing = self.edges.values().any(|e| {
+                matches!(e.kind, EdgeKind::Support | EdgeKind::Refines | EdgeKind::Contradicts)
+                    && ((e.source == *claim_id && e.target == *oid)
+                        || (e.source == *oid && e.target == *claim_id))
+            });
+            if has_existing { continue; }
+
+            // 관계 종류 결정
+            let (edge_kind, relation_type) = if is_reversal != *o_rev {
+                // 방향 충돌
+                (EdgeKind::Contradicts, "contradicts")
+            } else if kws.is_subset(okws) || okws.is_subset(&kws) {
+                // 포함 관계 → Refines (더 구체적인 것 → 더 일반적인 것)
+                (EdgeKind::Refines, "refines")
+            } else {
+                // 같은 방향 + 키워드 겹침
+                (EdgeKind::Support, "supports")
+            };
+
+            let (source, target) = if edge_kind == EdgeKind::Refines {
+                // 키워드가 더 많은 쪽이 더 구체적 → source
+                if kws.len() >= okws.len() { (*claim_id, *oid) } else { (*oid, *claim_id) }
+            } else {
+                (*claim_id, *oid)
+            };
+
+            let edge_id = self.add_edge(
+                Edge::new(source, target, edge_kind)
+                    .with_note(format!("승격 시 자동: {} (겹침: {})", relation_type, overlap.join(",")))
+            );
+
+            relations.push(AcceptRelation {
+                edge_id,
+                other_id: *oid,
+                other_statement: ostmt.clone(),
+                relation_type: relation_type.to_string(),
+                overlap_keywords: overlap,
+            });
+        }
+
+        relations
+    }
+
     /// 이 노드가 기각되면 영향받는 Knowledge 목록.
     pub fn impact_analysis(&self, node_id: &Uuid) -> Vec<Uuid> {
         // 이 노드를 Support/DependsOn하는 노드들 (역방향)
@@ -429,6 +688,38 @@ pub struct TemporalStatus {
     pub n_evidence: usize,
     pub n_contradicts: usize,
     pub trigger: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VerdictPropagation {
+    pub experiment_id: Uuid,
+    pub reason_id: Uuid,
+    pub reason_status: String,
+    pub n_experiments: usize,
+    pub n_accepted: usize,
+    pub n_weakened: usize,
+    pub claim_id: Option<Uuid>,
+    pub claim_recommendation: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DependencyDetection {
+    pub edge_id: Uuid,
+    pub source_id: Uuid,
+    pub source_statement: String,
+    pub target_id: Uuid,
+    pub target_statement: String,
+    pub overlap_keywords: Vec<String>,
+    pub jaccard: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AcceptRelation {
+    pub edge_id: Uuid,
+    pub other_id: Uuid,
+    pub other_statement: String,
+    pub relation_type: String,
+    pub overlap_keywords: Vec<String>,
 }
 
 impl Default for AmureGraph {

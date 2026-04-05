@@ -82,6 +82,10 @@ async fn main() {
         .route("/api/graph/temporal-health", get(temporal_health))
         .route("/api/graph/impact/{id}", get(impact_analysis))
         .route("/api/graph/dependencies/{id}", get(dependency_tree))
+        // Edge propagation
+        .route("/api/graph/propagate-verdict/{id}", post(propagate_verdict))
+        .route("/api/graph/detect-dependencies/{id}", post(detect_claim_dependencies))
+        .route("/api/graph/on-accept/{id}", post(on_accept))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -1305,4 +1309,38 @@ async fn dependency_tree(State(s): State<AppState>, Path(id): Path<Uuid>) -> Jso
     }).collect();
     let has_failed_dep = deps.iter().any(|(_, _, f)| *f);
     Json(serde_json::json!({"dependencies": details, "count": details.len(), "has_failed_dependency": has_failed_dep}))
+}
+
+// ── Edge Propagation Handlers ───────────────────────────────────────────
+
+/// 실험 verdict 후 Reason/Claim 상태 전파
+async fn propagate_verdict(State(s): State<AppState>, Path(experiment_id): Path<Uuid>) -> Json<serde_json::Value> {
+    let mut g = s.graph.write().await;
+    match g.propagate_verdict(&experiment_id) {
+        Some(result) => {
+            let _ = g.save(std::path::Path::new(DATA_DIR));
+            Json(serde_json::json!(result))
+        }
+        None => Json(serde_json::json!({"error": "experiment not found or no parent reason"})),
+    }
+}
+
+/// 새 Claim의 DependsOn 자동 감지
+async fn detect_claim_dependencies(State(s): State<AppState>, Path(claim_id): Path<Uuid>) -> Json<serde_json::Value> {
+    let mut g = s.graph.write().await;
+    let results = g.detect_claim_dependencies(&claim_id);
+    if !results.is_empty() {
+        let _ = g.save(std::path::Path::new(DATA_DIR));
+    }
+    Json(serde_json::json!({"dependencies": results, "count": results.len()}))
+}
+
+/// Knowledge 승격 시 관계 엣지 자동 생성
+async fn on_accept(State(s): State<AppState>, Path(claim_id): Path<Uuid>) -> Json<serde_json::Value> {
+    let mut g = s.graph.write().await;
+    let relations = g.on_accept(&claim_id);
+    if !relations.is_empty() {
+        let _ = g.save(std::path::Path::new(DATA_DIR));
+    }
+    Json(serde_json::json!({"relations": relations, "count": relations.len()}))
 }
