@@ -525,18 +525,45 @@ async fn detect_contradictions(State(s): State<AppState>) -> Json<serde_json::Va
 }
 
 fn do_detect_contradictions(g: &mut AmureGraph) -> Vec<ContradictionAlert> {
-    let meta_kw = ["validated", "disproven", "gap_derived", "auto_generated"];
+    // Scope-based contradiction detection.
+    // Uses metadata.scope.signal + metadata.direction instead of text matching.
 
-    let accepted: Vec<(Uuid, String, Vec<String>, bool)> = g
+    struct ClaimInfo {
+        id: Uuid,
+        statement: String,
+        direction: String,
+        signals: Vec<String>,
+        regime: String,
+    }
+
+    let accepted: Vec<ClaimInfo> = g
         .nodes_by_kind(NodeKind::Claim)
         .iter()
         .filter(|n| n.status == NodeStatus::Accepted)
         .map(|n| {
-            let is_reversal = n.statement.contains("reversal") || n.statement.contains("반전") || n.statement.contains("회귀");
-            let filtered_kw: Vec<String> = n.keywords.iter()
-                .filter(|k| !meta_kw.contains(&k.as_str()))
-                .cloned().collect();
-            (n.id, n.statement.clone(), filtered_kw, is_reversal)
+            let direction = n.metadata.get("direction")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| {
+                    // Fallback: infer from statement
+                    let s = n.statement.to_lowercase();
+                    if s.contains("reversal") || s.contains("반전") || s.contains("mean reversion") { "reversal" }
+                    else if s.contains("momentum") || s.contains("continuation") { "momentum" }
+                    else if s.contains("prediction") || s.contains("예측") { "prediction" }
+                    else { "neutral" }
+                }).to_string();
+
+            let signals: Vec<String> = n.metadata.get("scope")
+                .and_then(|s| s.get("signal"))
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase())).collect())
+                .unwrap_or_default();
+
+            let regime = n.metadata.get("scope")
+                .and_then(|s| s.get("regime"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("all").to_string();
+
+            ClaimInfo { id: n.id, statement: n.statement.clone(), direction, signals, regime }
         })
         .collect();
 
@@ -544,35 +571,52 @@ fn do_detect_contradictions(g: &mut AmureGraph) -> Vec<ContradictionAlert> {
 
     for i in 0..accepted.len() {
         for j in (i+1)..accepted.len() {
-            let (id_a, stmt_a, kw_a, rev_a) = &accepted[i];
-            let (id_b, stmt_b, kw_b, rev_b) = &accepted[j];
+            let a = &accepted[i];
+            let b = &accepted[j];
 
-            let kw_set_a: HashSet<String> = kw_a.iter().map(|k| k.to_lowercase()).collect();
-            let kw_set_b: HashSet<String> = kw_b.iter().map(|k| k.to_lowercase()).collect();
-            let overlap: Vec<String> = kw_set_a.intersection(&kw_set_b).cloned().collect();
+            // Skip if either has no signals (can't determine scope)
+            if a.signals.is_empty() || b.signals.is_empty() { continue; }
 
-            if overlap.len() >= 2 && rev_a != rev_b {
-                let has_edge = g.edges.values().any(|e| {
-                    e.kind == EdgeKind::Contradicts &&
-                    ((e.source == *id_a && e.target == *id_b) || (e.source == *id_b && e.target == *id_a))
-                });
+            // Check signal overlap
+            let sig_a: HashSet<&str> = a.signals.iter().map(|s| s.as_str()).collect();
+            let sig_b: HashSet<&str> = b.signals.iter().map(|s| s.as_str()).collect();
+            let signal_overlap: Vec<String> = sig_a.intersection(&sig_b).map(|s| s.to_string()).collect();
 
-                if !has_edge {
-                    g.add_edge(
-                        Edge::new(*id_a, *id_b, EdgeKind::Contradicts)
-                            .with_note(format!("자동 감지: 키워드 겹침({}) + 방향 충돌", overlap.join(",")))
-                    );
-                }
+            if signal_overlap.is_empty() { continue; }
 
-                alerts.push(ContradictionAlert {
-                    node_a_id: *id_a,
-                    node_a_statement: stmt_a.clone(),
-                    node_b_id: *id_b,
-                    node_b_statement: stmt_b.clone(),
-                    overlap_keywords: overlap,
-                    reason: format!("방향 충돌: {} vs {}", if *rev_a {"reversal"} else {"momentum"}, if *rev_b {"reversal"} else {"momentum"}),
-                });
+            // Check regime overlap (if both specify regime and they don't overlap → not contradicting)
+            let regime_overlaps = a.regime == "all" || b.regime == "all" || a.regime == b.regime;
+            if !regime_overlaps { continue; }
+
+            // Check direction conflict
+            let dir_conflicts = a.direction != b.direction
+                && a.direction != "neutral" && b.direction != "neutral"
+                && a.direction != "inconclusive" && b.direction != "inconclusive";
+
+            if !dir_conflicts { continue; }
+
+            // This is a real contradiction
+            let has_edge = g.edges.values().any(|e| {
+                e.kind == EdgeKind::Contradicts &&
+                ((e.source == a.id && e.target == b.id) || (e.source == b.id && e.target == a.id))
+            });
+
+            if !has_edge {
+                g.add_edge(
+                    Edge::new(a.id, b.id, EdgeKind::Contradicts)
+                        .with_note(format!("scope 기반: signal({}) 겹침 + direction 충돌 ({}↔{})",
+                            signal_overlap.join(","), a.direction, b.direction))
+                );
             }
+
+            alerts.push(ContradictionAlert {
+                node_a_id: a.id,
+                node_a_statement: a.statement.clone(),
+                node_b_id: b.id,
+                node_b_statement: b.statement.clone(),
+                overlap_keywords: signal_overlap,
+                reason: format!("scope 기반: {}↔{} direction 충돌", a.direction, b.direction),
+            });
         }
     }
 
