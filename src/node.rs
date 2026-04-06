@@ -32,6 +32,8 @@ pub struct Node {
     pub status: NodeStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 impl Node {
@@ -46,6 +48,7 @@ impl Node {
             status: NodeStatus::Draft,
             created_at: now,
             updated_at: now,
+            embedding: None,
         }
     }
 
@@ -66,6 +69,11 @@ impl Node {
 
     pub fn is_failed(&self) -> bool {
         matches!(self.status, NodeStatus::Rejected | NodeStatus::Weakened)
+    }
+
+    /// 임베딩용 텍스트: statement + keywords 결합
+    pub fn embed_text(&self) -> String {
+        format!("{} {}", self.statement, self.keywords.join(" "))
     }
 
     /// 노드의 모든 텍스트를 소문자 토큰으로 반환 (검색용)

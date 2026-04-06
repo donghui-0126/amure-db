@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use crate::embedding::cosine_similarity;
 use crate::graph::AmureGraph;
 use crate::node::tokenize;
 use crate::synonym::SynonymDict;
@@ -79,6 +80,72 @@ pub fn search(
     }
 
     // Filter failed if requested
+    if !opts.include_failed {
+        results.retain(|r| !r.failed_path);
+    }
+
+    results.truncate(opts.top_k);
+    results
+}
+
+/// 임베딩 우선 검색. API 장애 시 키워드 fallback.
+/// query_embedding이 None이면 기존 keyword-only 검색으로 자동 폴백.
+/// query_embedding이 있으면 100% 임베딩 스코어링 + Graph Walk으로 연결 노드 확장.
+pub fn search_hybrid(
+    graph: &AmureGraph,
+    query: &str,
+    synonyms: &SynonymDict,
+    opts: &SearchOptions,
+    query_embedding: Option<&[f32]>,
+) -> Vec<SearchResult> {
+    // API 장애 → 기존 키워드 검색으로 fallback
+    if query_embedding.is_none() {
+        return search(graph, query, synonyms, opts);
+    }
+    let q_emb = query_embedding.unwrap();
+
+    // Step 1: 모든 노드에 대해 임베딩 유사도 계산 → entry points
+    let mut emb_scored: Vec<(Uuid, f64)> = graph.nodes.iter()
+        .filter_map(|(id, node)| {
+            let emb = node.embedding.as_ref()?;
+            let sim = cosine_similarity(q_emb, emb);
+            if sim > 0.1 { Some((*id, sim)) } else { None }
+        })
+        .collect();
+    emb_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    emb_scored.truncate(opts.top_k * 3);
+
+    // Step 2: 임베딩 상위 노드에서 Graph Walk → 연결된 노드 확장
+    let candidates = graph_walk(graph, &emb_scored, opts.max_hops);
+
+    // Step 3: 모든 후보에 임베딩 스코어 부여 (100% embedding)
+    let mut final_candidates: HashMap<Uuid, (f64, usize, Vec<Uuid>)> = HashMap::new();
+    for (id, (_walk_score, hop, path)) in &candidates {
+        let emb_score = graph.get_node(id)
+            .and_then(|n| n.embedding.as_ref())
+            .map(|emb| cosine_similarity(q_emb, emb))
+            .unwrap_or(0.0);
+        final_candidates.insert(*id, (emb_score, *hop, path.clone()));
+    }
+
+    // Step 4: MMR reranking → 다양성 확보
+    let query_tokens = tokenize(query);
+    let expanded = synonyms.expand_all(&query_tokens);
+    let mut results = mmr_rerank(graph, final_candidates, &expanded, opts);
+
+    // Label failed paths
+    for r in &mut results {
+        if let Some(node) = graph.get_node(&r.node_id) {
+            if node.is_failed() {
+                r.failed_path = true;
+                let reason = node.metadata.get("reject_reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("기각됨");
+                r.path_label = Some(format!("이 경로는 이미 실패했다 — {}", reason));
+            }
+        }
+    }
+
     if !opts.include_failed {
         results.retain(|r| !r.failed_path);
     }

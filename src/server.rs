@@ -16,8 +16,9 @@ use uuid::Uuid;
 use amure_db::graph::AmureGraph;
 use amure_db::node::{Node, NodeKind, NodeStatus, tokenize};
 use amure_db::edge::{Edge, EdgeKind};
-use amure_db::search::{search, SearchOptions};
+use amure_db::search::{search, search_hybrid, SearchOptions};
 use amure_db::synonym::SynonymDict;
+use amure_db::embedding;
 
 const DATA_DIR: &str = "data/amure_graph";
 const DASHBOARD: &str = include_str!("../dashboard.html");
@@ -30,6 +31,17 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
+    // .env 파일에서 환경변수 로드
+    if let Ok(content) = std::fs::read_to_string(".env") {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            if let Some((key, value)) = line.split_once('=') {
+                std::env::set_var(key.trim(), value.trim());
+            }
+        }
+    }
+
     let graph = if std::path::Path::new(DATA_DIR).join("nodes.json").exists() {
         AmureGraph::load(std::path::Path::new(DATA_DIR)).unwrap_or_default()
     } else {
@@ -86,6 +98,10 @@ async fn main() {
         .route("/api/graph/propagate-verdict/{id}", post(propagate_verdict))
         .route("/api/graph/detect-dependencies/{id}", post(detect_claim_dependencies))
         .route("/api/graph/on-accept/{id}", post(on_accept))
+        // Embedding endpoints
+        .route("/api/graph/similar/{id}", get(similar_nodes))
+        .route("/api/graph/unrelated/{id}", get(unrelated_nodes))
+        .route("/api/graph/embed-all", post(embed_all_nodes))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -126,12 +142,17 @@ async fn graph_search(State(s): State<AppState>, Query(q): Query<SearchQuery>) -
         nodes.sort_by(|a, b| a["kind"].as_str().cmp(&b["kind"].as_str()));
         return Json(serde_json::json!({"results": nodes, "count": nodes.len()}));
     }
+
+    // 쿼리 임베딩 시도 (실패 시 keyword-only fallback)
+    let query_embedding = embedding::get_embedding(&query).await.ok();
+
     let g = s.graph.read().await;
-    let results = search(&g, &query, &s.synonyms, &SearchOptions {
+    let opts = SearchOptions {
         top_k: q.top_k.unwrap_or(10),
         include_failed: q.include_failed.unwrap_or(true),
         ..Default::default()
-    });
+    };
+    let results = search_hybrid(&g, &query, &s.synonyms, &opts, query_embedding.as_deref());
     Json(serde_json::json!({"results": results, "count": results.len()}))
 }
 
@@ -189,9 +210,25 @@ async fn create_node(State(s): State<AppState>, Json(req): Json<CreateNodeReq>) 
     if !req.metadata.is_null() {
         node = node.with_metadata(req.metadata);
     }
+    let embed_text = node.embed_text();
     let mut g = s.graph.write().await;
     let id = g.add_node(node);
     let _ = g.save(std::path::Path::new(DATA_DIR));
+    drop(g);
+
+    // 임베딩 비동기 계산 (응답 블로킹 없음)
+    let graph = s.graph.clone();
+    tokio::spawn(async move {
+        if let Ok(emb) = embedding::get_embedding(&embed_text).await {
+            let mut g = graph.write().await;
+            if let Some(node) = g.get_node_mut(&id) {
+                node.embedding = Some(emb);
+                node.updated_at = chrono::Utc::now();
+            }
+            let _ = g.save(std::path::Path::new(DATA_DIR));
+        }
+    });
+
     Json(serde_json::json!({"status": "created", "id": id}))
 }
 
@@ -1260,14 +1297,108 @@ async fn llm_verify_claim(State(s): State<AppState>, Json(req): Json<VerifyReq>)
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+// ── Embedding Endpoints ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SimilarQuery { top_k: Option<usize> }
+
+async fn similar_nodes(State(s): State<AppState>, Path(id): Path<Uuid>, Query(q): Query<SimilarQuery>) -> Json<serde_json::Value> {
+    let top_k = q.top_k.unwrap_or(5);
+    let g = s.graph.read().await;
+    let target_emb = match g.get_node(&id).and_then(|n| n.embedding.as_ref()) {
+        Some(emb) => emb.clone(),
+        None => return Json(serde_json::json!({"error": "Node has no embedding", "results": []})),
+    };
+
+    let mut scored: Vec<(uuid::Uuid, f64, String)> = g.nodes.iter()
+        .filter(|(nid, _)| **nid != id)
+        .filter_map(|(nid, node)| {
+            let emb = node.embedding.as_ref()?;
+            let sim = embedding::cosine_similarity(&target_emb, emb);
+            Some((*nid, sim, node.statement.clone()))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(top_k);
+
+    let results: Vec<serde_json::Value> = scored.iter().map(|(nid, sim, stmt)| {
+        serde_json::json!({"id": nid, "similarity": sim, "statement": stmt})
+    }).collect();
+    Json(serde_json::json!({"results": results, "count": results.len()}))
+}
+
+async fn unrelated_nodes(State(s): State<AppState>, Path(id): Path<Uuid>, Query(q): Query<SimilarQuery>) -> Json<serde_json::Value> {
+    let top_k = q.top_k.unwrap_or(5);
+    let g = s.graph.read().await;
+    let target_emb = match g.get_node(&id).and_then(|n| n.embedding.as_ref()) {
+        Some(emb) => emb.clone(),
+        None => return Json(serde_json::json!({"error": "Node has no embedding", "results": []})),
+    };
+
+    let mut scored: Vec<(uuid::Uuid, f64, String)> = g.nodes.iter()
+        .filter(|(nid, _)| **nid != id)
+        .filter_map(|(nid, node)| {
+            let emb = node.embedding.as_ref()?;
+            let sim = embedding::cosine_similarity(&target_emb, emb);
+            Some((*nid, sim, node.statement.clone()))
+        })
+        .collect();
+    // Sort ascending — least similar first
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(top_k);
+
+    let results: Vec<serde_json::Value> = scored.iter().map(|(nid, sim, stmt)| {
+        serde_json::json!({"id": nid, "similarity": sim, "statement": stmt})
+    }).collect();
+    Json(serde_json::json!({"results": results, "count": results.len()}))
+}
+
+async fn embed_all_nodes(State(s): State<AppState>) -> Json<serde_json::Value> {
+    // 임베딩이 없는 노드들의 텍스트 수집
+    let (texts, ids): (Vec<String>, Vec<Uuid>) = {
+        let g = s.graph.read().await;
+        g.nodes.iter()
+            .filter(|(_, n)| n.embedding.is_none())
+            .map(|(id, n)| (n.embed_text(), *id))
+            .unzip()
+    };
+
+    if texts.is_empty() {
+        return Json(serde_json::json!({"status": "ok", "embedded": 0, "message": "All nodes already have embeddings"}));
+    }
+
+    let total = texts.len();
+
+    match embedding::get_embeddings_batch(&texts).await {
+        Ok(embeddings) => {
+            let mut g = s.graph.write().await;
+            let mut count = 0usize;
+            for (id, emb) in ids.iter().zip(embeddings.into_iter()) {
+                if let Some(node) = g.get_node_mut(id) {
+                    node.embedding = Some(emb);
+                    count += 1;
+                }
+            }
+            let _ = g.save(std::path::Path::new(DATA_DIR));
+            Json(serde_json::json!({"status": "ok", "embedded": count, "total": total}))
+        }
+        Err(e) => {
+            Json(serde_json::json!({"status": "error", "message": format!("{}", e), "total": total}))
+        }
+    }
+}
+
 fn node_json(n: &Node) -> serde_json::Value {
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "id": n.id, "kind": format!("{:?}", n.kind), "statement": n.statement,
         "keywords": n.keywords, "status": format!("{:?}", n.status),
         "failed": n.is_failed(), "metadata": n.metadata,
         "created_at": n.created_at.to_rfc3339(),
         "updated_at": n.updated_at.to_rfc3339(),
-    })
+        "has_embedding": n.embedding.is_some(),
+    });
+    // 임베딩 벡터는 크므로 API 응답에 포함하지 않음 (has_embedding 플래그만)
+    v
 }
 
 fn edge_json(e: &Edge) -> serde_json::Value {
