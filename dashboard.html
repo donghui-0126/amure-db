@@ -164,10 +164,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',sans
   <h1 onclick="goHome()">amure-db</h1>
   <input class="search-box" id="q" placeholder="검색 (동의어 자동 확장)..." onkeydown="if(event.key==='Enter')doSearch()">
   <button class="btn b-blue" onclick="doSearch()">검색</button>
-  <button class="btn b-green" onclick="batchYahoo()">Yahoo 배치</button>
-  <button class="btn b-orange" onclick="autoOrganize()">자동 정리</button>
-  <input id="ysym" placeholder="종목 추가..." style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:6px 10px;border-radius:6px;font-size:13px;width:120px" onkeydown="if(event.key==='Enter')addSymbol()">
-  <button class="btn b-green" onclick="addSymbol()" style="padding:6px 10px">+</button>
   <div class="hdr-stats">
     <div>노드 <span id="sn">0</span></div>
     <div>엣지 <span id="se">0</span></div>
@@ -183,10 +179,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',sans
 
 <script>
 const API='';
-const KC={Claim:'#58a6ff',Reason:'#d2a8ff',Evidence:'#8b949e',Experiment:'#f0883e',Fact:'#3fb950'};
+const KC={Claim:'#58a6ff',Reason:'#d2a8ff',Evidence:'#8b949e',Experiment:'#f0883e'};
 const SC={Draft:'#8b949e',Active:'#58a6ff',Accepted:'#3fb950',Rejected:'#f85149',Weakened:'#d29922'};
 const EKC={Support:'#3fb950',Rebut:'#f85149',DependsOn:'#484f58',Contradicts:'#f85149',Refines:'#58a6ff',DerivedFrom:'#f0883e'};
-const KIND_LABELS={Claim:'Claim',Reason:'Reason',Evidence:'Evidence',Experiment:'Experiment',Fact:'Fact'};
+const KIND_LABELS={Claim:'Claim',Reason:'Reason',Evidence:'Evidence',Experiment:'Experiment'};
 const EDGE_LABELS={Support:'지지',Rebut:'반론',DependsOn:'의존',Contradicts:'충돌',Refines:'구체화',DerivedFrom:'파생'};
 
 let allNodes=[], allEdges=[];
@@ -231,7 +227,9 @@ function navigate(nodeId, pushHistory){
     currentNodeId=nodeId;
     window.location.hash=nodeId;
     addRecentVisit(nodeId);
-    renderNodePage(nodeId);
+    renderNodePage(nodeId).catch(e=>{
+      document.getElementById('content').innerHTML='<div style="padding:40px;color:#f85149">오류: '+e.message+'</div>';
+    });
     renderSidebar();
   }
   document.getElementById('main').scrollTop=0;
@@ -288,7 +286,7 @@ function renderSidebarKindStats(){
   const counts={};
   allNodes.forEach(n=>{counts[n.kind]=(counts[n.kind]||0)+1});
   let h='<div class="sidebar-section-title">노드 종류별 현황</div>';
-  for(const kind of ['Claim','Reason','Evidence','Experiment','Fact']){
+  for(const kind of ['Claim','Reason','Evidence','Experiment']){
     const c=counts[kind]||0;
     h+='<div class="sidebar-kind-stat"><div class="sk-dot" style="background:'+KC[kind]+'"></div>'+kind+'<span class="sk-count">'+c+'</span></div>';
   }
@@ -342,7 +340,7 @@ function renderHome(){
   h+='</div>';
   const groups={};
   allNodes.forEach(n=>{if(!groups[n.kind])groups[n.kind]=[];groups[n.kind].push(n)});
-  for(const kind of ['Claim','Reason','Evidence','Experiment','Fact']){
+  for(const kind of ['Claim','Reason','Evidence','Experiment']){
     const list=groups[kind]||[];
     if(list.length===0) continue;
     h+='<div class="kind-group">';
@@ -555,6 +553,9 @@ async function loadRecommendations(node, edgesData){
     const countEl=document.getElementById('rec-count');
     const tocRec=document.getElementById('toc-rec-count');
 
+    // 추천 로딩 중 다른 노드로 이동한 경우 DOM 요소가 없을 수 있음
+    if(!el||!countEl) return;
+
     if(results.length===0){
       el.innerHTML='<div style="color:#8b949e;font-size:13px;padding:8px">관련 추천 노드가 없습니다.</div>';
       countEl.textContent='0';
@@ -653,6 +654,7 @@ function renderBreadcrumb(){
   h+='<a onclick="goHome()">홈</a><span class="bc-sep">/</span>';
   for(let i=0;i<show.length;i++){
     const id=show[i];
+    if(!id) continue;
     const n=findNode(id);
     const label=n?n.statement.substring(0,20)+(n.statement.length>20?'...':''):id.substring(0,8);
     if(i===show.length-1){
@@ -669,7 +671,9 @@ function renderBreadcrumb(){
 async function changeStatus(nodeId, status){
   await patch('/api/graph/node/'+nodeId,{status:status});
   await loadAll();
-  renderNodePage(nodeId);
+  renderNodePage(nodeId).catch(e=>{
+    document.getElementById('content').innerHTML='<div style="padding:40px;color:#f85149">오류: '+e.message+'</div>';
+  });
   renderSidebar();
 }
 
@@ -678,39 +682,6 @@ async function deleteNode(nodeId){
   await del('/api/graph/node/'+nodeId);
   await loadAll();
   goHome();
-}
-
-async function addSymbol(){
-  const sym=document.getElementById('ysym').value.trim();
-  if(!sym) return;
-  document.getElementById('ysym').value='';
-  try{
-    const d=await post('/api/yahoo/fetch',{symbol:sym});
-    if(d.error) alert(d.error);
-    else{await loadAll();if(currentView==='home')renderHome()}
-  } catch(e){alert('오류: '+e.message)}
-}
-
-async function batchYahoo(){
-  const input=prompt('종목 목록 (쉼표 구분):\n예: AAPL,MSFT,GOOGL,AMZN,TSLA,NVDA,META,JPM,KO,XOM,SPY,QQQ');
-  if(!input) return;
-  const symbols=input.split(',').map(s=>s.trim()).filter(s=>s);
-  try{
-    const d=await post('/api/yahoo/batch',{symbols:symbols});
-    alert('생성: '+d.n_created+' facts'+(d.errors&&d.errors.length?' / 오류: '+d.errors.length:''));
-    await loadAll();
-    if(currentView==='home') renderHome();
-  } catch(e){alert('오류: '+e.message)}
-}
-
-async function autoOrganize(){
-  try{
-    const d=await post('/api/yahoo/auto-organize',{});
-    if(d.error){alert(d.error);return}
-    alert('자동 정리: '+d.claims_created+' claims, '+d.edges_created+' edges 생성');
-    await loadAll();
-    if(currentView==='home') renderHome();
-  } catch(e){alert('오류: '+e.message)}
 }
 
 // --- Utilities ---

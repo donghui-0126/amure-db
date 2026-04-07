@@ -1,8 +1,8 @@
 /// amure-db standalone server
-/// Port 8081 — graph API + Yahoo Finance auto-populate + dashboard
+/// Port 8081 — graph API + dashboard
 /// Single owner of graph data. AlphaFactor calls via HTTP.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use axum::routing::{get, post, patch, delete};
@@ -75,19 +75,13 @@ async fn main() {
         .route("/api/detect-contradictions", post(detect_contradictions))
         .route("/api/auto-gap-claims", post(auto_gap_claims))
         .route("/api/suggest-combinations", get(suggest_combinations))
-        // Yahoo Finance
-        .route("/api/yahoo/fetch", post(yahoo_fetch))
-        .route("/api/yahoo/batch", post(yahoo_batch))
-        .route("/api/yahoo/auto-organize", post(auto_organize))
         // Legacy endpoints (keep existing)
         .route("/api/claim", post(create_claim))
         .route("/api/edge", post(create_edge_legacy))
         .route("/api/save", post(save_graph))
         // LLM endpoints
         .route("/api/llm/auto-tag", post(llm_auto_tag))
-        .route("/api/llm/auto-tag-all", post(llm_auto_tag_all))
         .route("/api/llm/summarize", post(llm_summarize_search))
-        .route("/api/llm/explain-groups", post(llm_explain_groups))
         .route("/api/llm/verify-claim", post(llm_verify_claim))
         // Causal chain + temporal tracking
         .route("/api/graph/causal-chains/{id}", get(causal_chains))
@@ -192,7 +186,7 @@ async fn delete_node(State(s): State<AppState>, Path(id): Path<Uuid>) -> Json<se
 
 #[derive(Deserialize)]
 struct CreateNodeReq {
-    kind: String,            // "Claim", "Reason", "Evidence", "Experiment", "Fact"
+    kind: String,            // "Claim", "Reason", "Evidence", "Experiment"
     statement: String,
     #[serde(default)]
     keywords: Vec<String>,
@@ -794,245 +788,6 @@ fn do_suggest_failure_combinations(g: &AmureGraph) -> Vec<CombinationSuggestion>
     suggestions
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Yahoo Finance
-// ══════════════════════════════════════════════════════════════════════════════
-
-#[derive(Deserialize)]
-struct YahooReq { symbol: String }
-
-#[derive(Deserialize)]
-struct YahooBatchReq { symbols: Vec<String> }
-
-async fn yahoo_fetch(State(s): State<AppState>, Json(req): Json<YahooReq>) -> Json<serde_json::Value> {
-    match fetch_yahoo_fact(&req.symbol).await {
-        Ok((node, meta)) => {
-            let stmt = node.statement.clone();
-            let kw = node.keywords.clone();
-            let mut g = s.graph.write().await;
-            let id = g.add_node(node);
-            let _ = g.save(std::path::Path::new(DATA_DIR));
-            Json(serde_json::json!({"status": "created", "id": id, "statement": stmt, "keywords": kw, "metadata": meta}))
-        }
-        Err(e) => Json(serde_json::json!({"error": e})),
-    }
-}
-
-async fn yahoo_batch(State(s): State<AppState>, Json(req): Json<YahooBatchReq>) -> Json<serde_json::Value> {
-    let mut created = Vec::new();
-    let mut errors = Vec::new();
-    for sym in &req.symbols {
-        match fetch_yahoo_fact(sym).await {
-            Ok((node, _)) => {
-                let stmt = node.statement.clone();
-                let mut g = s.graph.write().await;
-                let id = g.add_node(node);
-                drop(g);
-                created.push(serde_json::json!({"id": id, "symbol": sym, "statement": stmt}));
-            }
-            Err(e) => errors.push(serde_json::json!({"symbol": sym, "error": e})),
-        }
-    }
-    let g = s.graph.read().await;
-    let _ = g.save(std::path::Path::new(DATA_DIR));
-    Json(serde_json::json!({"created": created, "errors": errors, "n_created": created.len()}))
-}
-
-async fn fetch_yahoo_fact(symbol: &str) -> Result<(Node, serde_json::Value), String> {
-    let url = format!(
-        "https://query1.finance.yahoo.com/v8/finance/chart/{}?period1={}&period2={}&interval=1d",
-        symbol,
-        (chrono::Utc::now() - chrono::Duration::days(90)).timestamp(),
-        chrono::Utc::now().timestamp(),
-    );
-    let client = reqwest::Client::new();
-    let resp = client.get(&url).header("User-Agent", "Mozilla/5.0").send().await.map_err(|e| e.to_string())?;
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-
-    let result = &body["chart"]["result"];
-    if result.is_null() || !result.is_array() || result.as_array().unwrap().is_empty() {
-        return Err("No data from Yahoo".into());
-    }
-
-    let r0 = &result[0];
-    let meta = &r0["meta"];
-    let closes: Vec<f64> = r0["indicators"]["quote"][0]["close"].as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_f64()).collect()).unwrap_or_default();
-    let volumes: Vec<f64> = r0["indicators"]["quote"][0]["volume"].as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_f64()).collect()).unwrap_or_default();
-
-    if closes.len() < 2 { return Err("Insufficient data".into()); }
-
-    let last = *closes.last().unwrap();
-    let first = *closes.first().unwrap();
-    let ret = ((last / first) - 1.0) * 100.0;
-    let avg_vol = if volumes.is_empty() { 0.0 } else { volumes.iter().sum::<f64>() / volumes.len() as f64 };
-    let currency = meta["currency"].as_str().unwrap_or("USD");
-    let exchange = meta["exchangeName"].as_str().unwrap_or("?");
-
-    let statement = format!("{}: 가격 {:.2} {}, 3개월 {:+.1}%, 거래량 {:.0}, {}", symbol, last, currency, ret, avg_vol, exchange);
-
-    let mut keywords = vec![symbol.to_lowercase()];
-    let sym = symbol.to_uppercase();
-
-    let sector_kw: &[&str] = match sym.as_str() {
-        "AAPL" => &["apple", "tech", "대형주", "나스닥", "하드웨어", "아이폰"],
-        "MSFT" => &["microsoft", "tech", "대형주", "클라우드", "ai", "azure", "소프트웨어"],
-        "GOOGL" | "GOOG" => &["google", "alphabet", "tech", "대형주", "ai", "광고", "검색"],
-        "AMZN" => &["amazon", "tech", "대형주", "ecommerce", "aws", "클라우드", "소비재"],
-        "TSLA" => &["tesla", "ev", "전기차", "고변동성", "자동차", "소비재"],
-        "NVDA" => &["nvidia", "ai", "gpu", "반도체", "tech", "대형주"],
-        "META" => &["facebook", "meta", "tech", "광고", "메타버스", "소셜"],
-        "JPM" => &["jpmorgan", "은행", "금융", "배당", "가치주", "대형주"],
-        "BAC" => &["bank_of_america", "은행", "금융", "배당"],
-        "GS" => &["goldman_sachs", "금융", "투자은행"],
-        "KO" => &["coca-cola", "음료", "경기방어", "배당", "가치주", "필수소비재"],
-        "PG" => &["procter_gamble", "필수소비재", "경기방어", "배당"],
-        "WMT" => &["walmart", "유통", "소비재", "배당"],
-        "XOM" => &["exxon", "에너지", "석유", "오일", "배당"],
-        "CVX" => &["chevron", "에너지", "석유", "오일", "배당"],
-        "SPY" => &["s&p500", "etf", "인덱스", "미국주식", "대형주"],
-        "QQQ" => &["nasdaq", "나스닥", "etf", "tech", "성장주"],
-        "VOO" => &["vanguard", "s&p500", "etf", "인덱스", "저비용"],
-        "SCHD" => &["schwab", "배당", "etf", "가치주", "income", "고배당"],
-        "TLT" => &["국채", "채권", "금리", "안전자산", "etf", "장기채"],
-        _ => &[],
-    };
-    keywords.extend(sector_kw.iter().map(|s| s.to_string()));
-
-    let sym_lower = symbol.to_lowercase();
-    if sym_lower.contains("btc") || sym_lower.contains("bitcoin") { keywords.extend(["crypto".into(), "bitcoin".into(), "비트코인".into()]); }
-    else if sym_lower.contains("eth") && !sym_lower.contains("meth") { keywords.extend(["crypto".into(), "ethereum".into(), "이더리움".into()]); }
-    else if sym_lower.contains("sol") { keywords.extend(["crypto".into(), "solana".into(), "defi".into()]); }
-
-    if ret > 10.0 { keywords.push("상승".into()); keywords.push("강세".into()); }
-    else if ret > 0.0 { keywords.push("상승".into()); }
-    if ret < -10.0 { keywords.push("하락".into()); keywords.push("약세".into()); }
-    else if ret < 0.0 { keywords.push("하락".into()); }
-
-    if closes.len() > 5 {
-        let daily_rets: Vec<f64> = closes.windows(2).map(|w| ((w[1] / w[0]) - 1.0).abs()).collect();
-        let avg_abs_ret = daily_rets.iter().sum::<f64>() / daily_rets.len() as f64;
-        if avg_abs_ret > 0.025 { keywords.push("고변동성".into()); keywords.push("변동성".into()); }
-    }
-
-    keywords.push(exchange.to_lowercase());
-
-    let fact_meta = serde_json::json!({
-        "symbol": symbol, "price": last, "currency": currency, "exchange": exchange,
-        "return_3m": (ret * 100.0).round() / 100.0, "avg_volume": avg_vol.round(),
-        "n_bars": closes.len(), "fetched_at": chrono::Utc::now().to_rfc3339(),
-    });
-
-    let node = Node::new(NodeKind::Fact, statement, keywords)
-        .with_status(NodeStatus::Active)
-        .with_metadata(fact_meta.clone());
-
-    Ok((node, fact_meta))
-}
-
-// ── Auto Organize ───────────────────────────────────────────────────────────
-
-async fn auto_organize(State(s): State<AppState>) -> Json<serde_json::Value> {
-    let mut g = s.graph.write().await;
-    let mut claims_created = 0;
-    let mut edges_created = 0;
-
-    let facts: Vec<(Uuid, String, serde_json::Value)> = g.nodes.values()
-        .filter(|n| n.kind == NodeKind::Fact)
-        .map(|n| (n.id, n.statement.clone(), n.metadata.clone()))
-        .collect();
-
-    if facts.is_empty() {
-        return Json(serde_json::json!({"error": "No facts to organize. Fetch Yahoo data first."}));
-    }
-
-    let mut bullish = Vec::new();
-    let mut bearish = Vec::new();
-    for (id, stmt, meta) in &facts {
-        let ret = meta["return_3m"].as_f64().unwrap_or(0.0);
-        if ret > 5.0 { bullish.push((*id, stmt.clone(), ret)); }
-        else if ret < -10.0 { bearish.push((*id, stmt.clone(), ret)); }
-    }
-
-    if bullish.len() >= 2 {
-        let symbols: Vec<String> = bullish.iter().map(|(_, s, _)| s.split(':').next().unwrap_or("?").to_string()).collect();
-        let avg_ret: f64 = bullish.iter().map(|(_, _, r)| r).sum::<f64>() / bullish.len() as f64;
-        let claim = Node::new(NodeKind::Claim,
-            format!("최근 3개월 상승 종목군({})은 평균 {:.1}% 수익률로 모멘텀이 지속되고 있다", symbols.join(", "), avg_ret),
-            vec!["상승".into(), "모멘텀".into(), "momentum".into()])
-            .with_metadata(serde_json::json!({"trigger": "시장 전환 시 재검토", "auto_generated": true}));
-        let cid = g.add_node(claim);
-        claims_created += 1;
-        for (fid, _, _) in &bullish {
-            g.add_edge(Edge::new(*fid, cid, EdgeKind::DerivedFrom));
-            edges_created += 1;
-        }
-    }
-
-    if bearish.len() >= 2 {
-        let symbols: Vec<String> = bearish.iter().map(|(_, s, _)| s.split(':').next().unwrap_or("?").to_string()).collect();
-        let avg_ret: f64 = bearish.iter().map(|(_, _, r)| r).sum::<f64>() / bearish.len() as f64;
-        let claim = Node::new(NodeKind::Claim,
-            format!("최근 3개월 하락 종목군({})은 평균 {:.1}% 하락으로 조정 국면이다", symbols.join(", "), avg_ret),
-            vec!["하락".into(), "조정".into(), "correction".into()])
-            .with_metadata(serde_json::json!({"trigger": "반등 시그널 출현 시 재검토", "auto_generated": true}));
-        let cid = g.add_node(claim);
-        claims_created += 1;
-        for (fid, _, _) in &bearish {
-            g.add_edge(Edge::new(*fid, cid, EdgeKind::DerivedFrom));
-            edges_created += 1;
-        }
-    }
-
-    let mut sectors: HashMap<String, Vec<(Uuid, String)>> = HashMap::new();
-    for (id, stmt, meta) in &facts {
-        if let Some(sym) = meta["symbol"].as_str() {
-            let sector = guess_sector(sym);
-            sectors.entry(sector).or_default().push((*id, stmt.clone()));
-        }
-    }
-    for (sector, members) in &sectors {
-        if members.len() >= 2 {
-            let symbols: Vec<String> = members.iter().map(|(_, s)| s.split(':').next().unwrap_or("?").to_string()).collect();
-            let claim = Node::new(NodeKind::Claim,
-                format!("{} 섹터 종목군: {}", sector, symbols.join(", ")),
-                vec![sector.to_lowercase(), "섹터".into(), "sector".into()])
-                .with_metadata(serde_json::json!({"trigger": "섹터 구성 변경 시", "auto_generated": true, "sector": sector}));
-            let cid = g.add_node(claim);
-            claims_created += 1;
-            for (fid, _) in members {
-                g.add_edge(Edge::new(*fid, cid, EdgeKind::DerivedFrom));
-                edges_created += 1;
-            }
-        }
-    }
-
-    let _ = g.save(std::path::Path::new(DATA_DIR));
-    let summary = g.summary();
-
-    Json(serde_json::json!({
-        "status": "organized",
-        "claims_created": claims_created,
-        "edges_created": edges_created,
-        "total_nodes": summary.n_nodes,
-        "total_edges": summary.n_edges,
-    }))
-}
-
-fn guess_sector(symbol: &str) -> String {
-    match symbol {
-        "AAPL" | "MSFT" | "GOOGL" | "META" | "NVDA" => "Tech".into(),
-        "AMZN" | "TSLA" => "Consumer".into(),
-        "JPM" | "BAC" | "GS" => "Finance".into(),
-        "KO" | "PG" | "WMT" => "Defensive".into(),
-        "XOM" | "CVX" => "Energy".into(),
-        s if s.contains("BTC") || s.contains("ETH") || s.contains("SOL") => "Crypto".into(),
-        s if s.starts_with("SPY") || s.starts_with("QQQ") || s.starts_with("VOO") || s.starts_with("SCHD") || s.starts_with("TLT") => "ETF".into(),
-        _ => "Other".into(),
-    }
-}
-
 // ── Legacy Claim/Edge creation (keep existing dashboard working) ───────────
 
 #[derive(Deserialize)]
@@ -1125,43 +880,6 @@ async fn llm_auto_tag(State(s): State<AppState>, Json(req): Json<AutoTagReq>) ->
     }
 }
 
-async fn llm_auto_tag_all(State(s): State<AppState>) -> Json<serde_json::Value> {
-    let fact_ids: Vec<(Uuid, String)> = {
-        let g = s.graph.read().await;
-        g.nodes.values()
-            .filter(|n| n.kind == NodeKind::Fact)
-            .map(|n| (n.id, n.statement.clone()))
-            .collect()
-    };
-
-    let mut tagged = 0;
-    for (id, stmt) in &fact_ids {
-        let prompt = format!(
-            "금융 데이터의 핵심 키워드 추출. 한국어+영어, 쉼표 구분, 10개 이내.\n\
-            섹터, 산업, 투자특성, 테마 포함.\n데이터: {}\n키워드만:", stmt
-        );
-        if let Ok(resp) = call_llm(&prompt).await {
-            let keywords: Vec<String> = resp.split(',')
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| s.len() >= 2 && s.len() < 30)
-                .collect();
-            let mut g = s.graph.write().await;
-            if let Some(node) = g.get_node_mut(id) {
-                for kw in &keywords {
-                    if !node.keywords.contains(kw) { node.keywords.push(kw.clone()); }
-                }
-            }
-            drop(g);
-            tagged += 1;
-        }
-    }
-
-    let g = s.graph.read().await;
-    let _ = g.save(std::path::Path::new(DATA_DIR));
-
-    Json(serde_json::json!({"status": "done", "tagged": tagged, "total": fact_ids.len()}))
-}
-
 #[derive(Deserialize)]
 struct SummarizeReq { query: String, top_k: Option<usize> }
 
@@ -1198,77 +916,23 @@ async fn llm_summarize_search(State(s): State<AppState>, Json(req): Json<Summari
     }
 }
 
-async fn llm_explain_groups(State(s): State<AppState>) -> Json<serde_json::Value> {
-    let g = s.graph.read().await;
-
-    let claims: Vec<(String, Vec<String>)> = g.nodes.values()
-        .filter(|n| n.kind == NodeKind::Claim)
-        .map(|claim| {
-            let fact_stmts: Vec<String> = g.edges.values()
-                .filter(|e| e.target == claim.id)
-                .filter_map(|e| g.get_node(&e.source))
-                .filter(|n| n.kind == NodeKind::Fact)
-                .map(|n| n.statement.clone())
-                .collect();
-            (claim.statement.clone(), fact_stmts)
-        })
-        .filter(|(_, facts)| !facts.is_empty())
-        .collect();
-    drop(g);
-
-    if claims.is_empty() {
-        return Json(serde_json::json!({"error": "No claims with facts to explain"}));
-    }
-
-    let mut explanations = Vec::new();
-    for (claim_stmt, facts) in &claims {
-        let facts_text = facts.iter().enumerate()
-            .map(|(i, f)| format!("  {}. {}", i+1, f))
-            .collect::<Vec<_>>().join("\n");
-
-        let prompt = format!(
-            "다음 그룹의 종목/데이터가 왜 같이 묶였는지 경제적 이유를 2-3문장으로 설명해.\n\
-            공통된 경제적 메커니즘, 산업 트렌드, 매크로 요인을 중심으로.\n\n\
-            그룹 주장: {}\n포함 데이터:\n{}\n\n경제적 이유:",
-            claim_stmt, facts_text
-        );
-
-        match call_llm(&prompt).await {
-            Ok(explanation) => {
-                explanations.push(serde_json::json!({
-                    "claim": claim_stmt,
-                    "n_facts": facts.len(),
-                    "explanation": explanation.trim(),
-                }));
-            }
-            Err(e) => {
-                explanations.push(serde_json::json!({
-                    "claim": claim_stmt,
-                    "error": e,
-                }));
-            }
-        }
-    }
-
-    Json(serde_json::json!({"explanations": explanations, "n_groups": explanations.len()}))
-}
-
 #[derive(Deserialize)]
 struct VerifyReq { claim_id: Uuid }
 
 async fn llm_verify_claim(State(s): State<AppState>, Json(req): Json<VerifyReq>) -> Json<serde_json::Value> {
-    let (claim_stmt, facts, keywords) = {
+    let (claim_stmt, evidence, keywords) = {
         let g = s.graph.read().await;
         let claim = match g.get_node(&req.claim_id) {
             Some(n) if n.kind == NodeKind::Claim => n,
             _ => return Json(serde_json::json!({"error": "Claim not found"})),
         };
-        let fact_stmts: Vec<String> = g.edges.values()
+        let evidence_stmts: Vec<String> = g.edges.values()
             .filter(|e| e.target == req.claim_id)
             .filter_map(|e| g.get_node(&e.source))
+            .filter(|n| n.kind == NodeKind::Evidence)
             .map(|n| n.statement.clone())
             .collect();
-        (claim.statement.clone(), fact_stmts, claim.keywords.clone())
+        (claim.statement.clone(), evidence_stmts, claim.keywords.clone())
     };
 
     let prompt = format!(
@@ -1282,14 +946,14 @@ async fn llm_verify_claim(State(s): State<AppState>, Json(req): Json<VerifyReq>)
         주의사항: (1줄)",
         claim_stmt,
         keywords.join(", "),
-        facts.iter().enumerate().map(|(i,f)| format!("  {}. {}", i+1, f)).collect::<Vec<_>>().join("\n")
+        evidence.iter().enumerate().map(|(i,f)| format!("  {}. {}", i+1, f)).collect::<Vec<_>>().join("\n")
     );
 
     match call_llm(&prompt).await {
         Ok(assessment) => Json(serde_json::json!({
             "claim": claim_stmt,
             "assessment": assessment.trim(),
-            "n_supporting_facts": facts.len(),
+            "n_supporting_evidence": evidence.len(),
         })),
         Err(e) => Json(serde_json::json!({"error": e})),
     }
@@ -1414,7 +1078,6 @@ fn parse_node_kind(s: &str) -> NodeKind {
         "Reason" | "reason" => NodeKind::Reason,
         "Evidence" | "evidence" => NodeKind::Evidence,
         "Experiment" | "experiment" => NodeKind::Experiment,
-        "Fact" | "fact" => NodeKind::Fact,
         _ => NodeKind::Claim,
     }
 }

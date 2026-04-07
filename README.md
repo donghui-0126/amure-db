@@ -9,7 +9,6 @@ amure-db (:8081)
   ├── AmureGraph (in-memory adjacency list, HashMap<Uuid, Node/Edge>)
   ├── Hybrid RAG Search (embedding → graph walk → MMR, fallback to token+synonym)
   ├── SynonymDict (30+ Korean/English quant term groups)
-  ├── Yahoo Finance → Fact nodes
   ├── LLM integration (auto-tag, summarize, verify)
   ├── Knowledge analysis (failure warning, contradiction detection, gap claims)
   ├── Graph intelligence (causal chains, impact analysis, temporal health)
@@ -51,7 +50,6 @@ export OPENAI_API_KEY=sk-...
 | **Reason** | Claim을 지지(Support) 또는 반박(Rebut)하는 논리 |
 | **Evidence** | Reason을 뒷받침하는 구체적 근거 |
 | **Experiment** | Evidence를 생산하는 실험 |
-| **Fact** | 외부 데이터 (Yahoo Finance 등) |
 
 Status: `Draft` → `Active` → `Accepted` / `Rejected` / `Weakened`
 
@@ -139,22 +137,12 @@ Output: ranked results, failed paths labeled "이 경로는 이미 실패했다"
 | POST | `/api/auto-gap-claims` | Verdict gaps → Draft Claim 자동 생성 |
 | GET | `/api/suggest-combinations` | 실패 실험 결합 아이디어 제안 |
 
-### Yahoo Finance
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/yahoo/fetch` | 종목 1개 → Fact 노드 생성 |
-| POST | `/api/yahoo/batch` | 여러 종목 일괄 생성 |
-| POST | `/api/yahoo/auto-organize` | Fact → Claim 자동 그룹핑 |
-
 ### LLM
 
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/llm/auto-tag` | 노드 키워드 자동 생성 |
-| POST | `/api/llm/auto-tag-all` | 전체 Fact 일괄 태깅 |
 | POST | `/api/llm/summarize` | RAG 결과 요약 |
-| POST | `/api/llm/explain-groups` | 그룹 경제적 이유 설명 |
 | POST | `/api/llm/verify-claim` | Claim 논리적 타당성 평가 |
 
 ## Storage
