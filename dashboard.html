@@ -163,6 +163,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',sans
 <div class="header">
   <h1 onclick="goHome()">amure-db</h1>
   <input class="search-box" id="q" placeholder="검색 (동의어 자동 확장)..." onkeydown="if(event.key==='Enter')doSearch()">
+  <select id="kind-filter" style="background:#0d1117;border:1px solid #30363d;color:#8b949e;padding:6px 10px;border-radius:6px;font-size:13px;cursor:pointer">
+    <option value="">전체 타입</option>
+    <option value="Claim">Claim</option>
+    <option value="Reason">Reason</option>
+    <option value="Evidence">Evidence</option>
+    <option value="Experiment">Experiment</option>
+  </select>
   <button class="btn b-blue" onclick="doSearch()">검색</button>
   <div class="hdr-stats">
     <div>노드 <span id="sn">0</span></div>
@@ -383,7 +390,9 @@ function renderNodeCard(n){
 async function doSearch(){
   const q=document.getElementById('q').value.trim();
   if(!q){goHome();return}
-  const d=await api('/api/graph/search?q='+encodeURIComponent(q)+'&top_k=10');
+  const kind=document.getElementById('kind-filter').value;
+  const kindParam=kind?'&kind='+encodeURIComponent(kind):'';
+  const d=await api('/api/graph/search?q='+encodeURIComponent(q)+'&top_k=10'+kindParam);
   const results=d.results||[];
   currentView='search';
   renderSidebar();

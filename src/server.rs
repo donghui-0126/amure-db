@@ -126,13 +126,16 @@ async fn graph_summary(State(s): State<AppState>) -> Json<serde_json::Value> {
 }
 
 #[derive(Deserialize)]
-struct SearchQuery { q: Option<String>, top_k: Option<usize>, include_failed: Option<bool> }
+struct SearchQuery { q: Option<String>, top_k: Option<usize>, include_failed: Option<bool>, kind: Option<String> }
 
 async fn graph_search(State(s): State<AppState>, Query(q): Query<SearchQuery>) -> Json<serde_json::Value> {
     let query = q.q.unwrap_or_default();
     if query.is_empty() {
         let g = s.graph.read().await;
-        let mut nodes: Vec<serde_json::Value> = g.nodes.values().map(node_json).collect();
+        let mut nodes: Vec<serde_json::Value> = g.nodes.values()
+            .filter(|n| q.kind.as_deref().map_or(true, |k| format!("{:?}", n.kind).eq_ignore_ascii_case(k)))
+            .map(node_json)
+            .collect();
         nodes.sort_by(|a, b| a["kind"].as_str().cmp(&b["kind"].as_str()));
         return Json(serde_json::json!({"results": nodes, "count": nodes.len()}));
     }
@@ -144,6 +147,7 @@ async fn graph_search(State(s): State<AppState>, Query(q): Query<SearchQuery>) -
     let opts = SearchOptions {
         top_k: q.top_k.unwrap_or(10),
         include_failed: q.include_failed.unwrap_or(true),
+        kind_filter: q.kind,
         ..Default::default()
     };
     let results = search_hybrid(&g, &query, &s.synonyms, &opts, query_embedding.as_deref());

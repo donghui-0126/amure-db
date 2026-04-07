@@ -31,6 +31,9 @@ pub struct SearchOptions {
     pub max_hops: usize,
     pub include_failed: bool,
     pub mmr_lambda: f64,
+    /// 특정 노드 종류만 반환. None이면 전체.
+    /// 예: Some("Claim"), Some("Reason")
+    pub kind_filter: Option<String>,
 }
 
 impl Default for SearchOptions {
@@ -40,6 +43,7 @@ impl Default for SearchOptions {
             max_hops: 2,
             include_failed: true,
             mmr_lambda: 0.7,
+            kind_filter: None,
         }
     }
 }
@@ -82,6 +86,11 @@ pub fn search(
     // Filter failed if requested
     if !opts.include_failed {
         results.retain(|r| !r.failed_path);
+    }
+
+    // Filter by node kind if requested
+    if let Some(ref kind) = opts.kind_filter {
+        results.retain(|r| r.kind.eq_ignore_ascii_case(kind));
     }
 
     results.truncate(opts.top_k);
@@ -148,6 +157,10 @@ pub fn search_hybrid(
 
     if !opts.include_failed {
         results.retain(|r| !r.failed_path);
+    }
+
+    if let Some(ref kind) = opts.kind_filter {
+        results.retain(|r| r.kind.eq_ignore_ascii_case(kind));
     }
 
     results.truncate(opts.top_k);
