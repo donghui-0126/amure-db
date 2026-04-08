@@ -1,41 +1,35 @@
-/// 3-Layer Graph RAG Search
-/// Layer 1: Token match + synonym expansion → entry points
+/// Embedding-only Graph RAG Search
+/// Layer 1: Cosine similarity between query embedding and node embeddings → entry points
 /// Layer 2: Graph walk (1-2 hop BFS) → candidate expansion
 /// Layer 3: MMR reranking → diverse final results
+/// Draft nodes are ALWAYS excluded from search results.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::embedding::cosine_similarity;
 use crate::graph::AmureGraph;
-use crate::node::tokenize;
-use crate::synonym::SynonymDict;
+use crate::node::NodeStatus;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     pub node_id: Uuid,
-    pub kind: String,
     pub statement: String,
-    pub keywords: Vec<String>,
+    pub abstract_: String,
     pub score: f64,
     pub hop_distance: usize,
     pub path: Vec<Uuid>,
-    pub failed_path: bool,
-    pub path_label: Option<String>,
     pub status: String,
+    pub n_experiments: usize,
 }
 
 /// 검색 옵션
 pub struct SearchOptions {
     pub top_k: usize,
     pub max_hops: usize,
-    pub include_failed: bool,
+    pub include_decline: bool,
     pub mmr_lambda: f64,
-    /// 특정 노드 종류만 반환. None이면 전체.
-    /// 예: Some("Claim"), Some("Reason")
-    pub kind_filter: Option<String>,
-    /// 특정 상태만 반환. None이면 전체.
-    /// 예: Some("Accepted"), Some("Rejected")
+    /// 특정 상태만 반환. None이면 전체 (Draft 제외).
     pub status_filter: Option<String>,
 }
 
@@ -44,84 +38,29 @@ impl Default for SearchOptions {
         Self {
             top_k: 10,
             max_hops: 2,
-            include_failed: true,
+            include_decline: false,
             mmr_lambda: 0.7,
-            kind_filter: None,
             status_filter: None,
         }
     }
 }
 
-/// 3-layer graph RAG search
+/// Embedding-based search. Returns empty if query_embedding is None.
 pub fn search(
     graph: &AmureGraph,
-    query: &str,
-    synonyms: &SynonymDict,
-    opts: &SearchOptions,
-) -> Vec<SearchResult> {
-    let query_tokens = tokenize(query);
-    if query_tokens.is_empty() {
-        return Vec::new();
-    }
-
-    // Layer 1: Token match + synonym expansion
-    let expanded = synonyms.expand_all(&query_tokens);
-    let entry_points = token_match(graph, &expanded, opts.top_k * 3);
-
-    // Layer 2: Graph walk from entry points
-    let candidates = graph_walk(graph, &entry_points, opts.max_hops);
-
-    // Layer 3: MMR reranking
-    let mut results = mmr_rerank(graph, candidates, &expanded, opts);
-
-    // Label failed paths
-    for r in &mut results {
-        if let Some(node) = graph.get_node(&r.node_id) {
-            if node.is_failed() {
-                r.failed_path = true;
-                let reason = node.metadata.get("reject_reason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("기각됨");
-                r.path_label = Some(format!("이 경로는 이미 실패했다 — {}", reason));
-            }
-        }
-    }
-
-    // Filter failed if requested
-    if !opts.include_failed {
-        results.retain(|r| !r.failed_path);
-    }
-
-    // Filter by node kind if requested
-    if let Some(ref kind) = opts.kind_filter {
-        results.retain(|r| r.kind.eq_ignore_ascii_case(kind));
-    }
-    if let Some(ref status) = opts.status_filter {
-        results.retain(|r| r.status.eq_ignore_ascii_case(status));
-    }
-
-    results.truncate(opts.top_k);
-    results
-}
-
-/// 임베딩 우선 검색. API 장애 시 키워드 fallback.
-/// query_embedding이 None이면 기존 keyword-only 검색으로 자동 폴백.
-/// query_embedding이 있으면 100% 임베딩 스코어링 + Graph Walk으로 연결 노드 확장.
-pub fn search_hybrid(
-    graph: &AmureGraph,
-    query: &str,
-    synonyms: &SynonymDict,
     opts: &SearchOptions,
     query_embedding: Option<&[f32]>,
 ) -> Vec<SearchResult> {
-    // API 장애 → 기존 키워드 검색으로 fallback
-    if query_embedding.is_none() {
-        return search(graph, query, synonyms, opts);
-    }
-    let q_emb = query_embedding.unwrap();
+    // No embedding → no results (no keyword fallback)
+    let q_emb = match query_embedding {
+        Some(emb) => emb,
+        None => return Vec::new(),
+    };
 
-    // Step 1: 모든 노드에 대해 임베딩 유사도 계산 → entry points
+    // Step 1: Cosine similarity against all non-Draft nodes
     let mut emb_scored: Vec<(Uuid, f64)> = graph.nodes.iter()
+        .filter(|(_, node)| node.status != NodeStatus::Draft)
+        .filter(|(_, node)| opts.include_decline || node.status != NodeStatus::Decline)
         .filter_map(|(id, node)| {
             let emb = node.embedding.as_ref()?;
             let sim = cosine_similarity(q_emb, emb);
@@ -131,44 +70,31 @@ pub fn search_hybrid(
     emb_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     emb_scored.truncate(opts.top_k * 3);
 
-    // Step 2: 임베딩 상위 노드에서 Graph Walk → 연결된 노드 확장
+    // Step 2: Graph walk from entry points
     let candidates = graph_walk(graph, &emb_scored, opts.max_hops);
 
-    // Step 3: 모든 후보에 임베딩 스코어 부여 (100% embedding)
+    // Step 3: Assign embedding scores to all candidates
     let mut final_candidates: HashMap<Uuid, (f64, usize, Vec<Uuid>)> = HashMap::new();
     for (id, (_walk_score, hop, path)) in &candidates {
-        let emb_score = graph.get_node(id)
-            .and_then(|n| n.embedding.as_ref())
+        let node = match graph.get_node(id) {
+            Some(n) => n,
+            None => continue,
+        };
+        // Always exclude Draft
+        if node.status == NodeStatus::Draft { continue; }
+        // Exclude Decline unless requested
+        if !opts.include_decline && node.status == NodeStatus::Decline { continue; }
+
+        let emb_score = node.embedding.as_ref()
             .map(|emb| cosine_similarity(q_emb, emb))
             .unwrap_or(0.0);
         final_candidates.insert(*id, (emb_score, *hop, path.clone()));
     }
 
-    // Step 4: MMR reranking → 다양성 확보
-    let query_tokens = tokenize(query);
-    let expanded = synonyms.expand_all(&query_tokens);
-    let mut results = mmr_rerank(graph, final_candidates, &expanded, opts);
+    // Step 4: MMR reranking
+    let mut results = mmr_rerank(graph, final_candidates, opts);
 
-    // Label failed paths
-    for r in &mut results {
-        if let Some(node) = graph.get_node(&r.node_id) {
-            if node.is_failed() {
-                r.failed_path = true;
-                let reason = node.metadata.get("reject_reason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("기각됨");
-                r.path_label = Some(format!("이 경로는 이미 실패했다 — {}", reason));
-            }
-        }
-    }
-
-    if !opts.include_failed {
-        results.retain(|r| !r.failed_path);
-    }
-
-    if let Some(ref kind) = opts.kind_filter {
-        results.retain(|r| r.kind.eq_ignore_ascii_case(kind));
-    }
+    // Apply status filter
     if let Some(ref status) = opts.status_filter {
         results.retain(|r| r.status.eq_ignore_ascii_case(status));
     }
@@ -177,34 +103,39 @@ pub fn search_hybrid(
     results
 }
 
-/// Layer 1: Token matching with synonym-expanded query
-fn token_match(
+/// Balanced search: return n Accept + n Decline results
+pub fn search_balanced(
     graph: &AmureGraph,
-    expanded_tokens: &[String],
-    top_k: usize,
-) -> Vec<(Uuid, f64)> {
-    let token_set: HashSet<&str> = expanded_tokens.iter().map(|s| s.as_str()).collect();
-    let n_query = expanded_tokens.len().max(1) as f64;
+    n: usize,
+    query_embedding: Option<&[f32]>,
+) -> Vec<SearchResult> {
+    let q_emb = match query_embedding {
+        Some(emb) => emb,
+        None => return Vec::new(),
+    };
 
-    let mut scored: Vec<(Uuid, f64)> = graph.nodes.iter().filter_map(|(id, node)| {
-        // Keyword match (weight 0.6)
-        let kw_matches = node.keywords.iter()
-            .filter(|k| token_set.contains(k.to_lowercase().as_str()))
-            .count();
+    // Get Accept results
+    let accept_opts = SearchOptions {
+        top_k: n,
+        include_decline: false,
+        status_filter: Some("Accept".to_string()),
+        ..Default::default()
+    };
+    let accept_results = search(graph, &accept_opts, Some(q_emb));
 
-        // Statement token match (weight 0.4)
-        let node_tokens = node.tokens();
-        let text_matches = node_tokens.iter()
-            .filter(|t| token_set.contains(t.as_str()))
-            .count();
+    // Get Decline results
+    let decline_opts = SearchOptions {
+        top_k: n,
+        include_decline: true,
+        status_filter: Some("Decline".to_string()),
+        ..Default::default()
+    };
+    let decline_results = search(graph, &decline_opts, Some(q_emb));
 
-        let score = (kw_matches as f64 * 0.6 + text_matches as f64 * 0.4) / n_query;
-        if score > 0.0 { Some((*id, score)) } else { None }
-    }).collect();
-
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(top_k);
-    scored
+    let mut results = Vec::new();
+    results.extend(accept_results);
+    results.extend(decline_results);
+    results
 }
 
 /// Layer 2: Graph walk from entry points, collecting candidates with decayed scores
@@ -213,14 +144,13 @@ fn graph_walk(
     entry_points: &[(Uuid, f64)],
     max_hops: usize,
 ) -> HashMap<Uuid, (f64, usize, Vec<Uuid>)> {
-    // candidate_id → (best_score, hop_distance, path)
     let mut candidates: HashMap<Uuid, (f64, usize, Vec<Uuid>)> = HashMap::new();
 
     for (entry_id, entry_score) in entry_points {
         let walked = graph.walk(entry_id, max_hops, None);
         for (node_id, hop) in walked {
             let decayed_score = entry_score * 0.5f64.powi(hop as i32);
-            let path = vec![*entry_id, node_id]; // simplified path
+            let path = vec![*entry_id, node_id];
 
             candidates.entry(node_id)
                 .and_modify(|(s, h, p)| {
@@ -237,11 +167,10 @@ fn graph_walk(
     candidates
 }
 
-/// Layer 3: MMR (Maximal Marginal Relevance) reranking
+/// Layer 3: MMR (Maximal Marginal Relevance) reranking using embedding similarity
 fn mmr_rerank(
     graph: &AmureGraph,
     candidates: HashMap<Uuid, (f64, usize, Vec<Uuid>)>,
-    _query_tokens: &[String],
     opts: &SearchOptions,
 ) -> Vec<SearchResult> {
     if candidates.is_empty() {
@@ -255,7 +184,7 @@ fn mmr_rerank(
         .collect();
 
     let mut selected: Vec<SearchResult> = Vec::new();
-    let mut selected_kw_sets: Vec<HashSet<String>> = Vec::new();
+    let mut selected_embeddings: Vec<Vec<f32>> = Vec::new();
 
     while !remaining.is_empty() && selected.len() < opts.top_k {
         let mut best_idx = 0;
@@ -264,16 +193,18 @@ fn mmr_rerank(
         for (i, (id, score, _, _)) in remaining.iter().enumerate() {
             let relevance = *score;
 
-            // Max similarity to already selected (Jaccard on keywords)
-            let max_sim = if selected_kw_sets.is_empty() {
+            // Max embedding similarity to already selected
+            let max_sim = if selected_embeddings.is_empty() {
                 0.0
             } else {
-                let node_kws: HashSet<String> = graph.get_node(id)
-                    .map(|n| n.keywords.iter().map(|k| k.to_lowercase()).collect())
-                    .unwrap_or_default();
-                selected_kw_sets.iter()
-                    .map(|sel_kws| jaccard(&node_kws, sel_kws))
-                    .fold(0.0f64, f64::max)
+                let node_emb = graph.get_node(id)
+                    .and_then(|n| n.embedding.as_ref());
+                match node_emb {
+                    Some(emb) => selected_embeddings.iter()
+                        .map(|sel_emb| cosine_similarity(emb, sel_emb))
+                        .fold(0.0f64, f64::max),
+                    None => 0.0,
+                }
             };
 
             let mmr = lambda * relevance - (1.0 - lambda) * max_sim;
@@ -285,20 +216,19 @@ fn mmr_rerank(
 
         let (id, score, hop, path) = remaining.remove(best_idx);
         if let Some(node) = graph.get_node(&id) {
-            let kw_set: HashSet<String> = node.keywords.iter().map(|k| k.to_lowercase()).collect();
-            selected_kw_sets.push(kw_set);
+            if let Some(emb) = node.embedding.as_ref() {
+                selected_embeddings.push(emb.clone());
+            }
 
             selected.push(SearchResult {
                 node_id: id,
-                kind: format!("{:?}", node.kind),
                 statement: node.statement.clone(),
-                keywords: node.keywords.clone(),
+                abstract_: node.abstract_.clone(),
                 score,
                 hop_distance: hop,
                 path,
-                failed_path: false,
-                path_label: None,
                 status: format!("{:?}", node.status),
+                n_experiments: node.experiments.len(),
             });
         }
     }
@@ -306,137 +236,100 @@ fn mmr_rerank(
     selected
 }
 
-/// Jaccard similarity between two keyword sets
-fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
-    if a.is_empty() && b.is_empty() {
-        return 0.0;
-    }
-    let intersection = a.intersection(b).count() as f64;
-    let union = a.union(b).count() as f64;
-    if union > 0.0 { intersection / union } else { 0.0 }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edge::{Edge, EdgeKind};
-    use crate::node::{Node, NodeKind, NodeStatus};
+    use crate::node::Node;
+
+    fn make_node_with_embedding(statement: &str, emb: Vec<f32>, status: NodeStatus) -> Node {
+        let mut n = Node::new(statement.into());
+        n.status = status;
+        n.embedding = Some(emb);
+        n
+    }
 
     fn build_test_graph() -> AmureGraph {
         let mut g = AmureGraph::new();
 
-        let c1 = g.add_node(Node::new(
-            NodeKind::Claim,
-            "OI 변화량은 momentum의 선행지표다".into(),
-            vec!["OI".into(), "momentum".into(), "open_interest".into()],
+        g.add_node(make_node_with_embedding(
+            "OI 변화량은 momentum의 선행지표다",
+            vec![1.0, 0.0, 0.0],
+            NodeStatus::Accept,
         ));
 
-        let r1 = g.add_node(Node::new(
-            NodeKind::Reason,
-            "OI 증가는 conviction 유입을 의미한다".into(),
-            vec!["OI".into(), "conviction".into()],
+        g.add_node(make_node_with_embedding(
+            "funding rate 극단값은 mean reversion 시그널이다",
+            vec![0.0, 1.0, 0.0],
+            NodeStatus::Accept,
         ));
 
-        let r2 = g.add_node(
-            Node::new(
-                NodeKind::Reason,
-                "거래소별 OI 집계가 달라서 노이즈가 크다".into(),
-                vec!["noise".into(), "exchange".into()],
-            ).with_status(NodeStatus::Weakened)
-        );
-
-        let c2 = g.add_node(Node::new(
-            NodeKind::Claim,
-            "funding rate 극단값은 mean reversion 시그널이다".into(),
-            vec!["funding".into(), "mean_reversion".into()],
+        g.add_node(make_node_with_embedding(
+            "OI 감소는 디레버리징의 시그널이다",
+            vec![0.9, 0.1, 0.0],
+            NodeStatus::Decline,
         ));
 
-        g.add_edge(Edge::new(r1, c1, EdgeKind::Support));
-        g.add_edge(Edge::new(r2, c1, EdgeKind::Rebut));
+        // Draft node — should never appear in results
+        g.add_node(make_node_with_embedding(
+            "Draft hypothesis",
+            vec![1.0, 0.0, 0.0],
+            NodeStatus::Draft,
+        ));
 
         g
     }
 
     #[test]
+    fn test_search_returns_empty_without_embedding() {
+        let g = build_test_graph();
+        let results = search(&g, &SearchOptions::default(), None);
+        assert!(results.is_empty());
+    }
+
+    #[test]
     fn test_search_basic() {
         let g = build_test_graph();
-        let syn = SynonymDict::new();
-        let results = search(&g, "OI momentum", &syn, &SearchOptions::default());
-
+        let query_emb = vec![1.0, 0.0, 0.0];
+        let results = search(&g, &SearchOptions::default(), Some(&query_emb));
         assert!(!results.is_empty());
-        // First result should be the OI claim (direct keyword match)
+        // First result should be the OI hypothesis (highest cosine similarity)
         assert!(results[0].statement.contains("OI"));
     }
 
     #[test]
-    fn test_search_synonym_expansion() {
+    fn test_search_excludes_draft() {
         let g = build_test_graph();
-        let syn = SynonymDict::new();
-        // "미결제약정" should find OI nodes via synonym
-        let results = search(&g, "미결제약정 추세", &syn, &SearchOptions::default());
-        assert!(!results.is_empty());
+        let query_emb = vec![1.0, 0.0, 0.0];
+        let results = search(&g, &SearchOptions { top_k: 20, include_decline: true, ..Default::default() }, Some(&query_emb));
+        assert!(results.iter().all(|r| r.status != "Draft"));
     }
 
     #[test]
-    fn test_search_graph_walk() {
+    fn test_search_excludes_decline_by_default() {
         let g = build_test_graph();
-        let syn = SynonymDict::new();
-        // Search for "conviction" should find the Reason AND the connected Claim via walk
-        let results = search(&g, "conviction", &syn, &SearchOptions { max_hops: 2, ..Default::default() });
-        let ids: Vec<_> = results.iter().map(|r| r.node_id).collect();
-        // Should have at least 2 results (reason + claim via graph walk)
-        assert!(results.len() >= 2);
+        let query_emb = vec![1.0, 0.0, 0.0];
+        let results = search(&g, &SearchOptions::default(), Some(&query_emb));
+        assert!(results.iter().all(|r| r.status != "Decline"));
     }
 
     #[test]
-    fn test_search_failed_paths() {
+    fn test_search_includes_decline_when_requested() {
         let g = build_test_graph();
-        let syn = SynonymDict::new();
-        let results = search(&g, "noise exchange", &syn, &SearchOptions {
-            include_failed: true,
-            ..Default::default()
-        });
-        let failed = results.iter().filter(|r| r.failed_path).count();
-        assert!(failed > 0, "Should find weakened node");
+        let query_emb = vec![1.0, 0.0, 0.0];
+        let results = search(&g, &SearchOptions { include_decline: true, ..Default::default() }, Some(&query_emb));
+        let has_decline = results.iter().any(|r| r.status == "Decline");
+        assert!(has_decline);
     }
 
     #[test]
-    fn test_search_exclude_failed() {
+    fn test_balanced_search() {
         let g = build_test_graph();
-        let syn = SynonymDict::new();
-        let results = search(&g, "noise exchange", &syn, &SearchOptions {
-            include_failed: false,
-            ..Default::default()
-        });
-        let failed = results.iter().filter(|r| r.failed_path).count();
-        assert_eq!(failed, 0);
-    }
-
-    #[test]
-    fn test_mmr_diversity() {
-        let mut g = AmureGraph::new();
-        // Add 5 nodes with same keywords — MMR should diversify
-        for i in 0..5 {
-            g.add_node(Node::new(
-                NodeKind::Claim,
-                format!("OI claim variant {}", i),
-                vec!["OI".into(), "momentum".into()],
-            ));
-        }
-        // Add 1 node with different keywords
-        g.add_node(Node::new(
-            NodeKind::Claim,
-            "funding rate claim".into(),
-            vec!["funding".into()],
-        ));
-
-        let syn = SynonymDict::new();
-        let results = search(&g, "OI momentum funding", &syn, &SearchOptions {
-            top_k: 3,
-            ..Default::default()
-        });
-        // With MMR, funding claim should appear even though OI claims score higher individually
-        let has_funding = results.iter().any(|r| r.statement.contains("funding"));
-        assert!(has_funding, "MMR should surface diverse funding result");
+        let query_emb = vec![1.0, 0.0, 0.0];
+        let results = search_balanced(&g, 5, Some(&query_emb));
+        // Should have results from both Accept and Decline
+        let has_accept = results.iter().any(|r| r.status == "Accept");
+        let has_decline = results.iter().any(|r| r.status == "Decline");
+        assert!(has_accept);
+        assert!(has_decline);
     }
 }

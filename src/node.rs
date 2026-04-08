@@ -1,4 +1,4 @@
-/// Node — 지식 그래프의 노드. 모든 지식은 한 문장 명제.
+/// Node — 지식 그래프의 노드. Hypothesis 단일 종류.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -6,19 +6,39 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeKind {
-    Claim,
-    Reason,
-    Evidence,
-    Experiment,
+    Hypothesis,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeStatus {
     Draft,
-    Active,
-    Accepted,
-    Rejected,
-    Weakened,
+    Accept,
+    Decline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExperimentKind {
+    Universe,
+    Regime,
+    Temporal,
+    Combo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Verdict {
+    Support,
+    Rebut,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Experiment {
+    pub id: Uuid,
+    pub kind: ExperimentKind,
+    pub target: String,
+    pub result: serde_json::Value,
+    pub verdict: Verdict,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,58 +46,47 @@ pub struct Node {
     pub id: Uuid,
     pub kind: NodeKind,
     pub statement: String,
-    pub keywords: Vec<String>,
-    pub metadata: serde_json::Value,
+    #[serde(rename = "abstract_", alias = "abstract_")]
+    pub abstract_: String,
+    pub discussion: String,
     pub status: NodeStatus,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub experiments: Vec<Experiment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl Node {
-    pub fn new(kind: NodeKind, statement: String, keywords: Vec<String>) -> Self {
+    pub fn new(statement: String) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
-            kind,
+            kind: NodeKind::Hypothesis,
             statement,
-            keywords,
-            metadata: serde_json::Value::Null,
+            abstract_: String::new(),
+            discussion: String::new(),
             status: NodeStatus::Draft,
+            experiments: Vec::new(),
+            embedding: None,
             created_at: now,
             updated_at: now,
-            embedding: None,
         }
     }
 
-    pub fn with_id(mut self, id: Uuid) -> Self {
-        self.id = id;
-        self
-    }
-
-    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
-        self.metadata = metadata;
-        self
-    }
-
-    pub fn with_status(mut self, status: NodeStatus) -> Self {
-        self.status = status;
-        self
-    }
-
-    pub fn is_failed(&self) -> bool {
-        matches!(self.status, NodeStatus::Rejected | NodeStatus::Weakened)
-    }
-
-    /// 임베딩용 텍스트: statement + keywords 결합
+    /// 임베딩용 텍스트: statement + abstract_ 결합
     pub fn embed_text(&self) -> String {
-        format!("{} {}", self.statement, self.keywords.join(" "))
+        if self.abstract_.is_empty() {
+            self.statement.clone()
+        } else {
+            format!("{} {}", self.statement, self.abstract_)
+        }
     }
 
     /// 노드의 모든 텍스트를 소문자 토큰으로 반환 (검색용)
     pub fn tokens(&self) -> Vec<String> {
-        let text = format!("{} {}", self.statement, self.keywords.join(" "));
+        let text = format!("{} {} {}", self.statement, self.abstract_, self.discussion);
         tokenize(&text)
     }
 }
@@ -122,21 +131,42 @@ mod tests {
 
     #[test]
     fn test_node_creation() {
-        let node = Node::new(
-            NodeKind::Claim,
-            "OI는 momentum의 선행지표다".into(),
-            vec!["OI".into(), "momentum".into()],
-        );
-        assert_eq!(node.kind, NodeKind::Claim);
+        let node = Node::new("OI는 momentum의 선행지표다".into());
+        assert_eq!(node.kind, NodeKind::Hypothesis);
         assert_eq!(node.status, NodeStatus::Draft);
-        assert!(!node.is_failed());
+        assert!(node.abstract_.is_empty());
+        assert!(node.experiments.is_empty());
     }
 
     #[test]
-    fn test_failed_status() {
-        let node = Node::new(NodeKind::Claim, "test".into(), vec![])
-            .with_status(NodeStatus::Rejected);
-        assert!(node.is_failed());
+    fn test_node_status() {
+        let mut node = Node::new("test".into());
+        node.status = NodeStatus::Accept;
+        assert_eq!(node.status, NodeStatus::Accept);
+        node.status = NodeStatus::Decline;
+        assert_eq!(node.status, NodeStatus::Decline);
+    }
+
+    #[test]
+    fn test_embed_text() {
+        let mut node = Node::new("statement".into());
+        assert_eq!(node.embed_text(), "statement");
+        node.abstract_ = "abstract summary".into();
+        assert_eq!(node.embed_text(), "statement abstract summary");
+    }
+
+    #[test]
+    fn test_experiment() {
+        let exp = Experiment {
+            id: Uuid::new_v4(),
+            kind: ExperimentKind::Universe,
+            target: "BTC,ETH".into(),
+            result: serde_json::json!({"IR": 0.5, "t_stat": 2.1}),
+            verdict: Verdict::Support,
+            note: Some("좋은 결과".into()),
+        };
+        assert_eq!(exp.kind, ExperimentKind::Universe);
+        assert_eq!(exp.verdict, Verdict::Support);
     }
 
     #[test]
