@@ -34,6 +34,9 @@ pub struct SearchOptions {
     /// 특정 노드 종류만 반환. None이면 전체.
     /// 예: Some("Claim"), Some("Reason")
     pub kind_filter: Option<String>,
+    /// 특정 상태만 반환. None이면 전체.
+    /// 예: Some("Accepted"), Some("Rejected")
+    pub status_filter: Option<String>,
 }
 
 impl Default for SearchOptions {
@@ -44,6 +47,7 @@ impl Default for SearchOptions {
             include_failed: true,
             mmr_lambda: 0.7,
             kind_filter: None,
+            status_filter: None,
         }
     }
 }
@@ -91,6 +95,9 @@ pub fn search(
     // Filter by node kind if requested
     if let Some(ref kind) = opts.kind_filter {
         results.retain(|r| r.kind.eq_ignore_ascii_case(kind));
+    }
+    if let Some(ref status) = opts.status_filter {
+        results.retain(|r| r.status.eq_ignore_ascii_case(status));
     }
 
     results.truncate(opts.top_k);
@@ -161,6 +168,9 @@ pub fn search_hybrid(
 
     if let Some(ref kind) = opts.kind_filter {
         results.retain(|r| r.kind.eq_ignore_ascii_case(kind));
+    }
+    if let Some(ref status) = opts.status_filter {
+        results.retain(|r| r.status.eq_ignore_ascii_case(status));
     }
 
     results.truncate(opts.top_k);

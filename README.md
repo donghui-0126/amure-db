@@ -1,167 +1,254 @@
 # amure-db
 
-Graph-based knowledge database with hybrid RAG search. Runs as a standalone HTTP server on port 8081.
+Hypothesis 기반 퀀트 지식 그래프 DB. AlphaFactor의 RAG 백엔드.
+
+---
 
 ## Architecture
 
 ```
-amure-db (:8081)
-  ├── AmureGraph (in-memory adjacency list, HashMap<Uuid, Node/Edge>)
-  ├── Hybrid RAG Search (embedding → graph walk → MMR, fallback to token+synonym)
-  ├── SynonymDict (30+ Korean/English quant term groups)
-  ├── LLM integration (auto-tag, summarize, verify)
-  ├── Knowledge analysis (failure warning, contradiction detection, gap claims)
-  ├── Graph intelligence (causal chains, impact analysis, temporal health)
-  └── Dashboard (force-directed graph, port 8081)
+AlphaFactor (:8080)  →  amure-db (:8081)
+                         - Hypothesis 노드 저장
+                         - OpenAI embedding 기반 RAG 검색
+                         - 그래프 관계 (reference/superset/subset/orthogonal)
 ```
 
 ### Source Files
 
 | File | Role |
 |------|------|
-| `node.rs` | Node types, Status, tokenizer, embedding field |
-| `edge.rs` | Edge types, weight, note |
-| `graph.rs` | In-memory graph engine — BFS walk, causal chains, verdict propagation, dependency detection |
-| `search.rs` | Hybrid RAG — embedding cosine → graph walk → MMR reranking (keyword fallback) |
-| `embedding.rs` | OpenAI `text-embedding-3-small` — single/batch, cosine similarity |
-| `synonym.rs` | Korean/English quant synonym dictionary |
-| `persistence.rs` | JSON atomic write (tmp → rename) |
-| `server.rs` | Axum HTTP server, all API endpoints |
+| `node.rs` | Hypothesis, Experiment, NodeStatus |
+| `edge.rs` | EdgeKind (Reference/Superset/Subset/Orthogonal), reason 필드 |
+| `graph.rs` | in-memory 그래프, BFS walk |
+| `search.rs` | embedding cosine → MMR reranking, keyword fallback |
+| `embedding.rs` | OpenAI text-embedding-3-small |
+| `persistence.rs` | JSON atomic write |
+| `server.rs` | Axum HTTP 서버 |
+
+---
+
+## Core Concepts
+
+### Node: Hypothesis
+
+모든 지식은 **Hypothesis 단일 노드**로 표현된다.
+
+```
+Hypothesis {
+    id          Uuid
+    statement   String              // 가설 한 문장
+    abstract_   String              // 핵심 발견 한줄평
+    discussion  String              // 한계, 노이즈, 추가 관찰
+    status      Draft | Accept | Decline
+    experiments Vec<Experiment>     // 실험 결과 내장
+    embedding   Vec<f32>            // OpenAI text-embedding-3-small
+}
+
+Experiment {
+    kind    Universe | Regime | Temporal | Combo
+    target  String              // 심볼군 / regime 축 / 기간 등
+    result  JSON                // IR, t-stat, hit_ratio 등
+    verdict Support | Rebut
+    note    String?
+}
+```
+
+**고정 실험:**
+
+| 종류 | 내용 | 필수 |
+|------|------|------|
+| Universe | 신생/비신생/메이저/알트/마이너 심볼군별 | ★ |
+| Regime | ETH가격·자기자신가격·ETHOI·자기자신OI × bull/bear/sideways | ★ |
+| Temporal | monthly rolling IR/t-stat, improving/decaying 추세 | ★ |
+| Combo | feature/event 결합 조건부 검증 | ★★ |
+
+**Universe strict 기준:** `|IR| > 0.1 AND |t| > 1.96` 미달 → 해당 심볼군 자동 rebut
+
+**Regime strict 기준:** 최소 1축 유의미 필수, 방향 불일치 다수 → rebut 가중
+
+### Edge
+
+노드 간 관계. **모든 엣지에 reason(사유) 필수.**
+
+```
+Edge {
+    source  Uuid
+    target  Uuid
+    kind    Reference | Superset | Subset | Orthogonal
+    reason  String    // 왜 이 관계인지
+}
+```
+
+| 관계 | 의미 | 1-hop context 포함 |
+|------|------|-------------------|
+| reference | 조건/메커니즘 교집합 | ✓ |
+| superset | source가 target의 상위개념 | ✓ |
+| subset | source가 target의 부분집합 | ✓ |
+| orthogonal | 완전히 다른 영역 | ✗ |
+
+---
+
+## V2 Pipeline (AlphaFactor 연동)
+
+```
+[User: idea 입력]
+      │
+      ▼
+   RAG SEARCH
+  - GET /api/graph/search/balanced?q=&n=
+  - accept N개 + decline N개 균형
+  - root node 목록 + 각 1-hop 기존 엣지 로드
+      │
+      ▼
+  GRAPH TO TEXT GATE
+  ┌─────────────────────────────────────────────────────────┐
+  │ Step 1. root node 기존 엣지 텍스트화 (rule-based)       │
+  │                                                         │
+  │   A(accept): {abstract}                                 │
+  │     →[superset]  B: {abstract}    ← A-B 기존 엣지       │
+  │     →[reference] C: {abstract}    ← A-C 기존 엣지       │
+  │                                                         │
+  │   X(accept): {abstract} →[orthogonal]                   │
+  │     (1-hop 없음)                                        │
+  │                                                         │
+  │ Step 2. idea → 각 root node 관계 + 사유 판단 (LLM)     │
+  │                                                         │
+  │   반환:                                                 │
+  │   { node_id: A, relation: "reference",                  │
+  │     reason: "BTC 급등 + 선물 과잉 메커니즘 공유" }      │
+  │   { node_id: X, relation: "orthogonal",                 │
+  │     reason: "대상 심볼군과 조건이 완전히 다름" }         │
+  │                                                         │
+  │   → 관계 + 사유 메모리 유지 (엣지 저장 시 재사용)       │
+  └─────────────────────────────────────────────────────────┘
+      │
+      ▼
+  GENERATE (LLM)
+  - graph-to-text context로 Hypothesis statement 작성
+  - pick 목록 반환 (실제 참고한 root node ID)
+  - POST /api/graph/node  → Hypothesis 생성 (status: draft)
+      │
+      ▼
+  EXECUTE (Julia)
+  ├── UNIVERSE  (필수 ★)
+  │     5개 심볼군 독립 실험, strict: |IR|>0.1 AND |t|>1.96
+  ├── REGIME    (필수 ★)
+  │     4축 × 3상태 (ETH가격/자기자신가격/ETHOI/자기자신OI × bull/bear/sideways)
+  ├── TEMPORAL  (필수 ★)
+  │     monthly rolling IR/t-stat, improving/decaying 추세 판단
+  └── COMBO     (사실상 필수 ★★)
+        feature/event 결합, 유의미한 결합 없으면 skip 허용
+      │
+      ▼
+  INTERPRET (LLM)
+  - 각 실험 → support | rebut + 근거
+  - strict 미달 실험 자동 rebut 반영
+  - abstract  생성 (핵심 발견 한줄)
+  - discussion 생성 (한계, 노이즈, 추가 관찰)
+  - POST /api/graph/node/{id}/experiments  → 실험 결과 저장
+      │
+      ▼
+  JUDGE (LLM)
+  - 전체 실험 + abstract 종합
+  - accept | decline (binary)
+  - PATCH /api/graph/node/{id}  → status, abstract_, discussion 업데이트
+      │
+      ▼
+  [항상 amure-db 저장 — accept/decline 무관]
+  - picked root node에만 엣지 추가
+  - Step 2 판단 결과 재사용 (LLM 재호출 없음)
+  ┌────────────────────────────────────────────────────┐
+  │ reference / superset / subset picked:              │
+  │   POST /api/graph/edge { kind, reason }            │
+  │                                                    │
+  │ orthogonal picked:                                 │
+  │   POST /api/graph/edge { kind: orthogonal, reason }│
+  │                                                    │
+  │ 미pick 노드: 엣지 없음                             │
+  └────────────────────────────────────────────────────┘
+```
+
+---
+
+## API Reference
+
+### Node
+
+```
+POST   /api/graph/node                    Hypothesis 생성 (embedding 자동)
+GET    /api/graph/node/{id}               노드 조회
+PATCH  /api/graph/node/{id}              status / abstract_ / discussion 업데이트
+DELETE /api/graph/node/{id}              삭제 (엣지 cascade)
+
+POST   /api/graph/node/{id}/experiments  실험 결과 추가
+GET    /api/graph/node/{id}/experiments  실험 목록 조회
+```
+
+### Edge
+
+```
+POST   /api/graph/edge     엣지 추가 { source, target, kind, reason(필수) }
+DELETE /api/graph/edge/{id}
+```
+
+### Search / RAG
+
+```
+GET /api/graph/search?q=&top_k=&status=
+  status: accept | decline | draft | all
+  embedding 기반 (fallback: keyword), Draft 항상 제외
+
+GET /api/graph/search/balanced?q=&n=
+  accept n개 + decline n개 균형 반환 (RAG 전용)
+
+GET /api/graph/walk/{id}?hops=1&exclude_orthogonal=true
+  1-hop 이웃 반환, orthogonal 엣지 제외 옵션
+```
+
+### Graph
+
+```
+GET  /api/graph/all
+GET  /api/graph/summary
+POST /api/graph/embed-all    전체 노드 임베딩 재생성
+```
+
+---
 
 ## Quick Start
 
 ```bash
-cargo build --release
+# 1. .env 설정
+echo "OPENAI_API_KEY=sk-..." > .env
 
-# With semantic search (optional)
-export OPENAI_API_KEY=sk-...
-
-./target/release/amure-server
-# → http://localhost:8081
+# 2. 빌드 & 실행
+cargo run  # :8081
 ```
 
-## Core Concepts
+## 환경변수
 
-### Nodes
+| 변수 | 설명 | 비고 |
+|------|------|------|
+| `OPENAI_API_KEY` | embedding 생성 | 없으면 keyword fallback |
 
-| Kind | Description |
-|------|-------------|
-| **Claim** | 검증 가능한 명제. Knowledge graph의 핵심 단위 |
-| **Reason** | Claim을 지지(Support) 또는 반박(Rebut)하는 논리 |
-| **Evidence** | Reason을 뒷받침하는 구체적 근거 |
-| **Experiment** | Evidence를 생산하는 실험 |
+---
 
-Status: `Draft` → `Active` → `Accepted` / `Rejected` / `Weakened`
-
-### Edges
-
-| Kind | Direction | Description |
-|------|-----------|-------------|
-| **Support** | Reason → Claim | 지지 |
-| **Rebut** | Reason → Claim | 반박 |
-| **DependsOn** | A → B | A가 참이려면 B가 참이어야 함 |
-| **Contradicts** | A ↔ B | 동시 참 불가 |
-| **Refines** | A → B | A는 B의 구체적 버전 |
-| **DerivedFrom** | A → B | A는 B에서 파생 |
-
-### Hybrid RAG Search
+## 마이그레이션 (v1 → v2)
 
 ```
-Query: "미결제약정 추세"
-  ↓
-Step 1: OpenAI embedding → cosine similarity → top entry points
-        (OPENAI_API_KEY 없으면 token match + synonym expansion으로 fallback)
-  ↓
-Step 2: Graph walk (1-2 hop BFS from entry points)
-        entry_score × 0.5^hop → distance-decayed candidates
-  ↓
-Step 3: MMR reranking (λ=0.7)
-        Jaccard similarity on keywords → relevance vs. diversity balance
-  ↓
-Output: ranked results, failed paths labeled "이 경로는 이미 실패했다"
+1. POST /api/graph/embed-all  → 기존 노드 임베딩 생성
+2. accepted Claim → Hypothesis(accept) 변환
+3. Reason / Evidence / Experiment 노드 전부 삭제
+4. 기존 엣지 전부 삭제
+5. 새 엣지 LLM 기반 재구성
 ```
 
-- 노드 생성 시 embedding 비동기 자동 계산 (응답 블로킹 없음)
-- `OPENAI_API_KEY` 없어도 keyword+synonym 검색으로 graceful degradation
-
-## API Reference
-
-### Graph CRUD
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/graph/all` | 전체 노드 + 엣지 |
-| GET | `/api/graph/summary` | 통계 (노드/엣지 수, 종류별) |
-| GET | `/api/graph/search?q=&top_k=10&include_failed=` | Hybrid RAG 검색 |
-| GET | `/api/graph/node/{id}` | 노드 상세 + 연결된 엣지 |
-| POST | `/api/graph/node` | 노드 추가 → embedding 비동기 계산 |
-| PATCH | `/api/graph/node/{id}` | 노드 업데이트 |
-| DELETE | `/api/graph/node/{id}` | 노드 삭제 (엣지 cascade) |
-| POST | `/api/graph/edge` | 엣지 추가 |
-| DELETE | `/api/graph/edge/{id}` | 엣지 삭제 |
-| GET | `/api/graph/walk/{id}?hops=2` | BFS 탐색 |
-| GET | `/api/graph/subgraph/{id}` | 서브그래프 추출 (시각화용) |
-
-### Embedding
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/graph/similar/{id}?top_k=5` | 임베딩 기반 유사 노드 |
-| GET | `/api/graph/unrelated/{id}?top_k=5` | 임베딩 기반 비유사 노드 |
-| POST | `/api/graph/embed-all` | embedding 없는 모든 노드 일괄 생성 |
-
-### Graph Intelligence
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/graph/causal-chains/{id}` | 인과 체인 탐색 |
-| GET | `/api/graph/temporal-health` | 시간별 유효성 + 재검증 스케줄 |
-| GET | `/api/graph/impact/{id}` | 기각 시 영향 분석 (역방향 전파) |
-| GET | `/api/graph/dependencies/{id}` | 의존성 트리 |
-
-### Edge Propagation
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/graph/propagate-verdict/{id}` | Experiment verdict → Reason/Claim 상태 자동 전파 |
-| POST | `/api/graph/detect-dependencies/{id}` | Claim 간 Jaccard → DependsOn 엣지 자동생성 |
-| POST | `/api/graph/on-accept/{id}` | Accept 시 Support/Refines/Contradicts 자동 연결 |
-
-### Knowledge Analysis
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/check-failures` | 유사 실패 경고 + 미사용 방법론 표시 |
-| GET | `/api/check-revalidation` | 30일+ Knowledge 재검증 알림 |
-| POST | `/api/detect-contradictions` | 충돌 감지 + Contradicts 엣지 생성 |
-| POST | `/api/auto-gap-claims` | Verdict gaps → Draft Claim 자동 생성 |
-| GET | `/api/suggest-combinations` | 실패 실험 결합 아이디어 제안 |
-
-### LLM
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/llm/auto-tag` | 노드 키워드 자동 생성 |
-| POST | `/api/llm/summarize` | RAG 결과 요약 |
-| POST | `/api/llm/verify-claim` | Claim 논리적 타당성 평가 |
+---
 
 ## Storage
 
 ```
 data/amure_graph/
-  ├── nodes.json    (embedding 벡터 포함, atomic write)
+  ├── nodes.json    (embedding 포함, atomic write)
   └── edges.json
 ```
-
-## Integration
-
-AlphaFactor (`:8080`) → HTTP → amure-db (`:8081`)
-
-amure-db가 먼저 기동되어야 함. AlphaFactor는 amure-db 다운 시 빈 결과로 graceful degradation.
-
-## Design Notes
-
-- **Hybrid search**: embedding 있으면 semantic search, 없으면 token+synonym — 항상 동작
-- **Explainable**: edge를 따라가면 왜 이 결과가 나왔는지 추적 가능
-- **Failure is knowledge**: rejected/weakened 노드도 검색 포함, 실패 경로 라벨링
-- **Auto propagation**: verdict → reason → claim 상태 자동 전파

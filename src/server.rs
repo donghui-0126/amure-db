@@ -126,7 +126,18 @@ async fn graph_summary(State(s): State<AppState>) -> Json<serde_json::Value> {
 }
 
 #[derive(Deserialize)]
-struct SearchQuery { q: Option<String>, top_k: Option<usize>, include_failed: Option<bool>, kind: Option<String> }
+struct SearchQuery {
+    q: Option<String>,
+    top_k: Option<usize>,
+    include_failed: Option<bool>,
+    kind: Option<String>,
+    status: Option<String>,
+    accepted: Option<usize>,
+    rejected: Option<usize>,
+    weakened: Option<usize>,
+    active: Option<usize>,
+    draft: Option<usize>,
+}
 
 async fn graph_search(State(s): State<AppState>, Query(q): Query<SearchQuery>) -> Json<serde_json::Value> {
     let query = q.q.unwrap_or_default();
@@ -140,14 +151,41 @@ async fn graph_search(State(s): State<AppState>, Query(q): Query<SearchQuery>) -
         return Json(serde_json::json!({"results": nodes, "count": nodes.len()}));
     }
 
-    // 쿼리 임베딩 시도 (실패 시 keyword-only fallback)
     let query_embedding = embedding::get_embedding(&query).await.ok();
 
+    // Status별 풀 검색: accepted=3&rejected=2 형태
+    let status_quotas: Vec<(&str, usize)> = [
+        ("Accepted", q.accepted),
+        ("Rejected", q.rejected),
+        ("Weakened", q.weakened),
+        ("Active", q.active),
+        ("Draft", q.draft),
+    ].iter().filter_map(|(s, n)| n.map(|n| (*s, n))).collect();
+
     let g = s.graph.read().await;
+
+    if !status_quotas.is_empty() {
+        let mut all_results = Vec::new();
+        for (status, count) in &status_quotas {
+            let opts = SearchOptions {
+                top_k: *count,
+                include_failed: true,
+                kind_filter: q.kind.clone(),
+                status_filter: Some(status.to_string()),
+                ..Default::default()
+            };
+            let results = search_hybrid(&g, &query, &s.synonyms, &opts, query_embedding.as_deref());
+            all_results.extend(results);
+        }
+        return Json(serde_json::json!({"results": all_results, "count": all_results.len(), "mode": "pool"}));
+    }
+
+    // 일반 검색
     let opts = SearchOptions {
         top_k: q.top_k.unwrap_or(10),
         include_failed: q.include_failed.unwrap_or(true),
         kind_filter: q.kind,
+        status_filter: q.status,
         ..Default::default()
     };
     let results = search_hybrid(&g, &query, &s.synonyms, &opts, query_embedding.as_deref());

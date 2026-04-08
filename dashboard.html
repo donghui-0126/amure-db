@@ -128,16 +128,25 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',sans
 .wiki-section-heading[data-color]{border-left-color:var(--section-color)}
 
 /* Connected node item */
-.conn-item{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;margin:4px 0;border-radius:6px;cursor:pointer;background:#161b22;border:1px solid #21262d;transition:all .15s}
-.conn-item:hover{border-color:#30363d;background:#1c2128}
+.conn-item{display:flex;align-items:flex-start;gap:10px;padding:12px 16px;margin:6px 0;border-radius:8px;cursor:pointer;background:#161b22;border:1px solid #21262d;border-left:4px solid #30363d;transition:all .15s}
+.conn-item:hover{border-color:#30363d;background:#1c2128;border-left-color:#484f58}
 .conn-item .ci-arrow{color:#484f58;font-size:14px;flex-shrink:0;margin-top:2px}
 .conn-item .ci-kind{font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;flex-shrink:0;margin-top:1px}
 .conn-item .ci-body{flex:1;min-width:0}
-.conn-item .ci-statement{font-size:14px;color:#c9d1d9;line-height:1.4}
-.conn-item .ci-status{font-size:10px;padding:1px 6px;border-radius:8px;margin-left:4px}
+.conn-item .ci-statement{font-size:14px;color:#c9d1d9;line-height:1.5}
+.conn-item .ci-status{font-size:11px;padding:2px 8px;border-radius:8px;margin-left:6px;font-weight:600}
+.conn-item .ci-status-icon{margin-right:2px}
 .conn-item .ci-note{font-size:12px;color:#484f58;margin-top:4px;font-style:italic}
 .conn-item.ci-failed{opacity:.55}
 .conn-item.ci-failed .ci-statement{text-decoration:line-through}
+
+/* Status visual indicators */
+.status-indicator{display:inline-flex;align-items:center;gap:4px;font-size:12px;padding:3px 10px;border-radius:12px;font-weight:600}
+.status-indicator.st-draft{color:#8b949e;background:#8b949e22}
+.status-indicator.st-active{color:#58a6ff;background:#58a6ff22}
+.status-indicator.st-accepted{color:#3fb950;background:#3fb95022}
+.status-indicator.st-rejected{color:#f85149;background:#f8514922}
+.status-indicator.st-weakened{color:#d29922;background:#d2992222}
 
 /* Recommendation section */
 .rec-item{display:flex;align-items:center;gap:10px;padding:8px 14px;margin:4px 0;border-radius:6px;cursor:pointer;background:#161b22;border:1px solid #21262d;border-left:3px solid #484f58;transition:all .15s}
@@ -169,6 +178,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',sans
     <option value="Reason">Reason</option>
     <option value="Evidence">Evidence</option>
     <option value="Experiment">Experiment</option>
+  </select>
+  <select id="status-filter" style="background:#0d1117;border:1px solid #30363d;color:#8b949e;padding:6px 10px;border-radius:6px;font-size:13px;cursor:pointer">
+    <option value="">전체 상태</option>
+    <option value="Draft">○ Draft</option>
+    <option value="Active">◉ Active</option>
+    <option value="Accepted">✓ Accepted</option>
+    <option value="Rejected">✗ Rejected</option>
+    <option value="Weakened">△ Weakened</option>
   </select>
   <button class="btn b-blue" onclick="doSearch()">검색</button>
   <div class="hdr-stats">
@@ -345,8 +362,13 @@ function renderHome(){
   h+='<h2>amure-db 지식 그래프</h2>';
   h+='<input class="home-search-input" placeholder="검색어를 입력하세요..." onkeydown="if(event.key===\'Enter\'){document.getElementById(\'q\').value=this.value;doSearch()}">';
   h+='</div>';
+  const statusFilter=document.getElementById('status-filter').value;
+  const kindFilter=document.getElementById('kind-filter').value;
+  let filtered=allNodes;
+  if(statusFilter) filtered=filtered.filter(n=>n.status===statusFilter);
+  if(kindFilter) filtered=filtered.filter(n=>n.kind===kindFilter);
   const groups={};
-  allNodes.forEach(n=>{if(!groups[n.kind])groups[n.kind]=[];groups[n.kind].push(n)});
+  filtered.forEach(n=>{if(!groups[n.kind])groups[n.kind]=[];groups[n.kind].push(n)});
   for(const kind of ['Claim','Reason','Evidence','Experiment']){
     const list=groups[kind]||[];
     if(list.length===0) continue;
@@ -381,7 +403,8 @@ function renderNodeCard(n){
     for(const k of kws) h+='<span>'+esc(k)+'</span>';
     h+='</span>';
   }
-  h+='<span class="nc-status" style="color:'+sc+';background:'+sc+'22">'+n.status+'</span>';
+  const icon=STATUS_ICONS[n.status]||'';
+  h+='<span class="nc-status" style="color:'+sc+';background:'+sc+'22">'+icon+' '+n.status+'</span>';
   h+='</div>';
   return h;
 }
@@ -451,7 +474,7 @@ async function renderNodePage(nodeId){
   h+='<div class="wiki-header" id="sec-info">';
   h+='<div class="wiki-badges">';
   h+='<span class="wiki-kind-badge" style="color:'+kc+';background:'+kc+'18;border:1px solid '+kc+'33">'+node.kind+'</span>';
-  h+='<span class="wiki-status-badge" style="color:'+sc+';background:'+sc+'22">'+node.status+'</span>';
+  h+=renderStatusBadge(node.status);
   h+='</div>';
   h+='<div class="wiki-title"'+(isFailed?' style="text-decoration:line-through;opacity:.6"':'')+'>'+esc(node.statement)+'</div>';
 
@@ -519,16 +542,26 @@ async function renderNodePage(nodeId){
   loadRecommendations(node,edgesData);
 }
 
+const STATUS_ICONS={Draft:'○',Active:'◉',Accepted:'✓',Rejected:'✗',Weakened:'△'};
+
+function renderStatusBadge(status){
+  const sc=SC[status]||'#8b949e';
+  const icon=STATUS_ICONS[status]||'';
+  const cls='st-'+status.toLowerCase();
+  return '<span class="status-indicator '+cls+'"><span class="ci-status-icon">'+icon+'</span>'+status+'</span>';
+}
+
 function renderConnItem(item){
   const kc=KC[item.kind]||'#8b949e';
-  const sc=SC[item.status]||'#8b949e';
   const isFailed=item.status==='Rejected'||item.status==='Weakened';
-  let h='<div class="conn-item'+(isFailed?' ci-failed':'')+'" onclick="navigate(\''+item.nodeId+'\',true)">';
-  h+='<span class="ci-arrow">'+item.arrow+'</span>';
+  const borderColor=item.edgeColor||kc;
+  let h='<div class="conn-item'+(isFailed?' ci-failed':'')+'" style="border-left-color:'+borderColor+'" onclick="navigate(\''+item.nodeId+'\',true)">';
   h+='<span class="ci-kind" style="color:'+kc+';background:'+kc+'18">'+item.kind+'</span>';
   h+='<div class="ci-body">';
+  h+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
   h+='<span class="ci-statement">'+esc(item.statement)+'</span>';
-  h+=' <span class="ci-status" style="color:'+sc+';background:'+sc+'22">'+item.status+'</span>';
+  h+=renderStatusBadge(item.status||'Draft');
+  h+='</div>';
   if(item.note) h+='<div class="ci-note">'+esc(item.note)+'</div>';
   h+='</div></div>';
   return h;
@@ -625,7 +658,8 @@ function buildSectionsFromEdgeData(nodeId, edgesData){
       statement:otherStatement,
       status:otherStatus,
       note:e.note||'',
-      arrow:isSource?'→':'←'
+      arrow:isSource?'→':'←',
+      edgeColor:EKC[e.kind]||'#484f58'
     };
 
     for(const s of sections){
@@ -716,6 +750,13 @@ async function init(){
   } else {
     navigate(null,true);
   }
+  // 필터 변경 시 홈 뷰 재렌더링
+  document.getElementById('status-filter').addEventListener('change',function(){
+    if(currentView==='home') renderHome();
+  });
+  document.getElementById('kind-filter').addEventListener('change',function(){
+    if(currentView==='home') renderHome();
+  });
 }
 
 init();
