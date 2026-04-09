@@ -307,10 +307,23 @@ async fn create_edge(State(s): State<AppState>, Json(req): Json<CreateEdgeReq>) 
     }
     let kind = parse_edge_kind(&req.kind);
     let mut g = s.graph.write().await;
-    let edge = Edge::new(req.source, req.target, kind, req.reason);
+
+    // 정방향 엣지
+    let edge = Edge::new(req.source, req.target, kind, req.reason.clone());
     let id = g.add_edge(edge);
+
+    // 역방향 엣지 자동 생성
+    let reverse_kind = match kind {
+        EdgeKind::Subset => EdgeKind::Superset,
+        EdgeKind::Superset => EdgeKind::Subset,
+        EdgeKind::Reference => EdgeKind::Reference,
+        EdgeKind::Orthogonal => EdgeKind::Orthogonal,
+    };
+    let reverse_edge = Edge::new(req.target, req.source, reverse_kind, req.reason);
+    let reverse_id = g.add_edge(reverse_edge);
+
     let _ = g.save(std::path::Path::new(DATA_DIR));
-    Json(serde_json::json!({"status": "created", "id": id}))
+    Json(serde_json::json!({"status": "created", "id": id, "reverse_id": reverse_id}))
 }
 
 // ── DELETE /api/graph/edge/{id} ───────────────────────────────────────────
